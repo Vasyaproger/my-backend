@@ -1,5 +1,6 @@
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
+const mysql2 = require('mysql2'); // Добавлен импорт mysql2
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
@@ -22,6 +23,7 @@ const sequelize = new Sequelize({
   password: 'Vasya11091109',
   database: 'ch79145_myprojec',
   port: 3306,
+  dialectModule: mysql2, // Указываем использование mysql2
 });
 
 // Модель пользователя
@@ -136,7 +138,7 @@ app.post('/api/auth/register', upload.array('documents', 3), async (req, res) =>
       accountType,
       name,
       phone,
-  addressStreet,
+      addressStreet,
       addressCity,
       addressCountry,
       addressPostalCode,
