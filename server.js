@@ -13,7 +13,7 @@ const winston = require('winston');
 
 const app = express();
 
-// Настройка логгера для отслеживания ошибок и событий
+// Настройка логгера
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -27,11 +27,11 @@ const logger = winston.createLogger({
   ],
 });
 
-// Middleware для безопасности и обработки запросов
-app.use(helmet()); // Защита от уязвимостей HTTP
-app.use(cors()); // Разрешение кросс-доменных запросов
-app.use(express.json()); // Парсинг JSON
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads'))); // Статическая папка для файлов
+// Middleware
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
 // Настройка подключения к MySQL
 const sequelize = new Sequelize({
@@ -89,12 +89,16 @@ const User = sequelize.define('User', {
   verificationToken: { type: DataTypes.STRING },
   resetPasswordToken: { type: DataTypes.STRING },
   resetPasswordExpires: { type: DataTypes.DATE },
+  jwtToken: { // New field for storing JWT token
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
 }, {
   timestamps: true,
   tableName: 'Users',
 });
 
-// Модель для хранения маппинга Telegram username -> chat ID
+// Модель для Telegram маппинга
 const TelegramMapping = sequelize.define('TelegramMapping', {
   username: {
     type: DataTypes.STRING,
@@ -110,7 +114,7 @@ const TelegramMapping = sequelize.define('TelegramMapping', {
   tableName: 'TelegramMappings',
 });
 
-// Настройка загрузки файлов с помощью Multer
+// Настройка загрузки файлов
 const storage = multer.diskStorage({
   destination: './Uploads/documents/',
   filename: (req, file, cb) => {
@@ -142,7 +146,7 @@ const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
   },
 });
 
-// Обработка команды /start в Telegram
+// Обработка команды /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const username = msg.from.username || `user_${chatId}`;
@@ -159,7 +163,7 @@ bot.onText(/\/start/, async (msg) => {
   }
 });
 
-// Функция для преобразования Telegram ID (username или chat ID) в chat ID
+// Функция преобразования Telegram ID
 async function resolveTelegramId(telegramId) {
   if (/^\d+$/.test(telegramId)) {
     return telegramId;
@@ -171,7 +175,7 @@ async function resolveTelegramId(telegramId) {
   return mapping.chatId;
 }
 
-// Отправка сообщения верификации через Telegram
+// Отправка верификационного сообщения
 async function sendVerificationTelegram(telegramId, token) {
   try {
     const chatId = await resolveTelegramId(telegramId);
@@ -191,7 +195,7 @@ ${verificationUrl}
   }
 }
 
-// Отправка сообщения для сброса пароля через Telegram
+// Отправка сообщения сброса пароля
 async function sendPasswordResetTelegram(telegramId, token) {
   try {
     const chatId = await resolveTelegramId(telegramId);
@@ -278,6 +282,13 @@ app.post('/api/auth/register',
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
       const verificationToken = jwt.sign({ email }, process.env.JWT_SECRET || 'your_jwt_secret', { expiresIn: '1d' });
+      
+      // Generate JWT token for authentication
+      const authToken = jwt.sign(
+        { email, accountType, name, telegramId },
+        process.env.JWT_SECRET || 'your_jwt_secret',
+        { expiresIn: '7d' }
+      );
 
       const user = await User.create({
         email,
@@ -292,17 +303,36 @@ app.post('/api/auth/register',
         addressPostalCode,
         documents: req.files.map(file => file.path),
         verificationToken,
+        jwtToken: authToken, // Store the token in the database
       });
 
       try {
         await sendVerificationTelegram(telegramId, verificationToken);
         logger.info(`Пользователь зарегистрирован: ${email}`);
-        res.status(201).json({ message: 'Регистрация успешна! Проверьте Telegram для подтверждения.' });
+        res.status(201).json({
+          message: 'Регистрация успешна! Проверьте Telegram для подтверждения.',
+          token: authToken, // Return the token to the client
+          user: {
+            id: user.id,
+            email: user.email,
+            accountType: user.accountType,
+            name: user.name,
+            telegramId: user.telegramId,
+          }
+        });
       } catch (telegramError) {
         logger.warn(`Пользователь зарегистрирован, но сообщение в Telegram не отправлено для ${email}: ${telegramError.message}`);
         res.status(201).json({
           message: 'Регистрация успешна, но сообщение в Telegram не отправлено. Убедитесь, что вы отправили /start боту.',
+          token: authToken,
           email,
+          user: {
+            id: user.id,
+            email: user.email,
+            accountType: user.accountType,
+            name: user.name,
+            telegramId: user.telegramId,
+          }
         });
       }
     } catch (error) {
@@ -372,11 +402,17 @@ app.post('/api/auth/login',
         return res.status(400).json({ message: 'Подтвердите ваш email через Telegram перед входом' });
       }
 
-      const token = jwt.sign(
-        { id: user.id, email: user.email },
-        process.env.JWT_SECRET || 'your_jwt_secret',
-        { expiresIn: '7d' }
-      );
+      // Use existing token if available, or generate new one
+      let token = user.jwtToken;
+      if (!token) {
+        token = jwt.sign(
+          { id: user.id, email: user.email },
+          process.env.JWT_SECRET || 'your_jwt_secret',
+          { expiresIn: '7d' }
+        );
+        user.jwtToken = token;
+        await user.save();
+      }
 
       logger.info(`Пользователь вошел: ${email}`);
       res.status(200).json({
@@ -475,6 +511,7 @@ app.post('/api/auth/reset-password/:token',
       user.password = await bcrypt.hash(password, salt);
       user.resetPasswordToken = null;
       user.resetPasswordExpires = null;
+      user.jwtToken = null; // Invalidate existing token on password reset
       await user.save();
 
       logger.info(`Пароль сброшен для ${user.email}`);
@@ -490,7 +527,7 @@ app.post('/api/auth/reset-password/:token',
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
-      attributes: { exclude: ['password', 'verificationToken', 'resetPasswordToken', 'resetPasswordExpires'] },
+      attributes: { exclude: ['password', 'verificationToken', 'resetPasswordToken', 'resetPasswordExpires', 'jwtToken'] },
     });
     if (!user) {
       return res.status(404).json({ message: 'Пользователь не найден' });
