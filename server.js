@@ -10,7 +10,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
-const fs = require('fs').promises; // For directory creation
+const fs = require('fs').promises;
 
 const app = express();
 
@@ -30,9 +30,17 @@ const logger = winston.createLogger({
 
 // Middleware
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  origin: '*', // Для локальной разработки; замените на конкретный домен в продакшене
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
+app.use('/uploads', express.static(path.join(__dirname, 'Uploads'), {
+  setHeaders: (res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+  }
+}));
 
 // Ensure upload directories exist
 const ensureDirectories = async () => {
@@ -44,6 +52,7 @@ const ensureDirectories = async () => {
   for (const dir of dirs) {
     try {
       await fs.mkdir(dir, { recursive: true });
+      await fs.chmod(dir, 0o755); // Устанавливаем права доступа
       logger.info(`Created directory: ${dir}`);
     } catch (error) {
       logger.error(`Failed to create directory ${dir}: ${error.message}`);
@@ -198,6 +207,8 @@ const storage = multer.diskStorage({
       cb(null, './Uploads/icons/');
     } else if (file.fieldname === 'apk') {
       cb(null, './Uploads/apks/');
+    } else {
+      cb(new Error('Invalid field name'), null);
     }
   },
   filename: (req, file, cb) => {
@@ -227,13 +238,19 @@ const upload = multer({
       }
       cb(new Error('Only JPG, JPEG, and PNG files allowed for icons!'));
     } else if (file.fieldname === 'apk') {
-      if (file.originalname.endsWith('.apk')) {
+      if (file.originalname.toLowerCase().endsWith('.apk')) {
         return cb(null, true);
       }
       cb(new Error('Only APK files allowed!'));
+    } else {
+      cb(new Error('Invalid field name!'));
     }
   },
-});
+}).fields([
+  { name: 'icon', maxCount: 1 },
+  { name: 'apk', maxCount: 1 },
+  { name: 'documents', maxCount: 3 },
+]);
 
 // Telegram bot setup
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
@@ -303,7 +320,6 @@ async function sendTelegramMessage(telegramId, message) {
     logger.info(`Message sent to chat ID ${chatId}`);
   } catch (error) {
     logger.error(`Error sending message to Telegram ID ${telegramId}: ${error.message}`);
-    throw error;
   }
 }
 
@@ -328,7 +344,6 @@ Token: ${token}
     logger.info(`Verification message sent to chat ID ${chatId}`);
   } catch (error) {
     logger.error(`Error sending verification message to Telegram ID ${telegramId}: ${error.message}`);
-    throw error;
   }
 }
 
@@ -352,7 +367,6 @@ If you didn't request this, ignore this message.
     logger.info(`Password reset message sent to chat ID ${chatId}`);
   } catch (error) {
     logger.error(`Error sending password reset message to Telegram ID ${telegramId}: ${error.message}`);
-    throw error;
   }
 }
 
@@ -361,6 +375,7 @@ const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
+    logger.warn('Authorization token missing');
     return res.status(401).json({ message: 'Authorization token required' });
   }
   try {
@@ -369,7 +384,7 @@ const authenticateToken = (req, res, next) => {
     next();
   } catch (error) {
     logger.error(`Invalid token: ${error.message}`);
-    return res.status(403).json({ message: 'Invalid token' });
+    return res.status(403).json({ message: 'Invalid or expired token' });
   }
 };
 
@@ -386,7 +401,7 @@ sequelize.sync({ alter: true }).then(() => {
 app.post(
   '/api/pre-register',
   [
-    body('email').isEmail().normalizeEmail(),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('telegramId').optional().trim().custom((value) => {
       if (!value || /^\d+$/.test(value) || /^@/.test(value)) {
         return true;
@@ -397,6 +412,7 @@ app.post(
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
@@ -423,7 +439,7 @@ app.post(
       res.status(201).json({ message });
     } catch (error) {
       logger.error(`Pre-registration error: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -431,23 +447,24 @@ app.post(
 // User registration
 app.post(
   '/api/auth/register',
-  upload.array('documents', 3),
+  upload,
   [
-    body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 8 }),
-    body('accountType').isIn(['individual', 'commercial']),
-    body('name').notEmpty().trim(),
-    body('phone').notEmpty().trim(),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('accountType').isIn(['individual', 'commercial']).withMessage('Invalid account type'),
+    body('name').notEmpty().trim().withMessage('Name is required'),
+    body('phone').notEmpty().trim().withMessage('Phone number is required'),
     body('telegramId').notEmpty().trim().custom((value) => {
       if (/^\d+$/.test(value) || /^@/.test(value)) {
         return true;
       }
       throw new Error('Telegram ID must be a numeric chat ID or username with @');
-    }),
+    }).withMessage('Invalid Telegram ID'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
@@ -457,7 +474,8 @@ app.post(
         addressStreet, addressCity, addressCountry, addressPostalCode,
       } = req.body;
 
-      if (!req.files || req.files.length === 0) {
+      if (!req.files || !req.files.documents || req.files.documents.length === 0) {
+        logger.warn('No documents uploaded during registration');
         return res.status(400).json({ message: 'At least one document is required' });
       }
 
@@ -491,7 +509,7 @@ app.post(
         addressCity,
         addressCountry,
         addressPostalCode,
-        documents: req.files.map(file => file.path),
+        documents: req.files.documents.map(file => file.path),
         verificationToken,
         jwtToken: authToken,
       });
@@ -526,7 +544,7 @@ app.post(
       }
     } catch (error) {
       logger.error(`Registration error: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -565,14 +583,14 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     try {
       await sendTelegramMessage(user.telegramId, `✅ Your email (${user.email}) is verified! Welcome to PlayEvit!`);
     } catch (telegramError) {
-      logger.warn(`Failed to send verification message to Telegram for ${user.email}`);
+      logger.warn(`Failed to send verification message to Telegram for ${user.email}: ${telegramError.message}`);
     }
 
     logger.info(`Email verified for ${user.email}`);
     res.status(200).json({ message: 'Email verified successfully!' });
   } catch (error) {
     logger.error(`Verification error: ${error.message}`);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -580,12 +598,13 @@ app.get('/api/auth/verify/:token', async (req, res) => {
 app.post(
   '/api/auth/verify-form',
   [
-    body('email').isEmail().normalizeEmail(),
-    body('token').notEmpty().trim(),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+    body('token').notEmpty().trim().withMessage('Token is required'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
@@ -627,14 +646,14 @@ app.post(
       try {
         await sendTelegramMessage(user.telegramId, `✅ Your email (${user.email}) is verified! Welcome to PlayEvit!`);
       } catch (telegramError) {
-        logger.warn(`Failed to send verification message to Telegram for ${user.email}`);
+        logger.warn(`Failed to send verification message to Telegram for ${user.email}: ${telegramError.message}`);
       }
 
       logger.info(`Email verified via form for ${user.email}`);
       res.status(200).json({ message: 'Email verified successfully!' });
     } catch (error) {
       logger.error(`Form verification error: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -643,12 +662,13 @@ app.post(
 app.post(
   '/api/auth/login',
   [
-    body('email').isEmail().normalizeEmail(),
-    body('password').notEmpty(),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+    body('password').notEmpty().withMessage('Password is required'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
@@ -679,12 +699,12 @@ app.post(
       }
 
       try {
-        await sendTelegramMessage(user.telegramId, `🔐 You logged into PlayEvit with email: ${email}`);
+        await sendTelegramMessage(user.telegramId, `🔐 You logged into PlayEvit with email: ${user.email}`);
       } catch (telegramError) {
-        logger.warn(`Failed to send login message to Telegram for ${email}`);
+        logger.warn(`Failed to send login message to Telegram for ${user.email}: ${telegramError.message}`);
       }
 
-      logger.info(`User logged in: ${email}`);
+      logger.info(`User logged in: ${user.email}`);
       res.status(200).json({
         token,
         user: {
@@ -698,7 +718,7 @@ app.post(
       });
     } catch (error) {
       logger.error(`Login error: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -706,10 +726,11 @@ app.post(
 // Password reset request
 app.post(
   '/api/auth/forgot-password',
-  [body('email').isEmail().normalizeEmail()],
+  [body('email').isEmail().normalizeEmail().withMessage('Valid email is required')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
@@ -717,20 +738,25 @@ app.post(
       const { email } = req.body;
       const user = await User.findOne({ where: { email } });
       if (!user) {
+        logger.warn(`Password reset attempt for non-existent email: ${email}`);
         return res.status(404).json({ message: 'User with this email not found' });
       }
 
-      const resetToken = jwt.sign({ email }, process.env.JWT_SECRET || 'your_jwt_secret', { expiresIn: '1h' });
+      const resetToken = jwt.sign(
+        { email },
+        process.env.JWT_SECRET || 'your_jwt_secret',
+        { expiresIn: '1h' }
+      );
       user.resetPasswordToken = resetToken;
       user.resetPasswordExpires = new Date(Date.now() + 3600000);
       await user.save();
 
       try {
         await sendPasswordResetTelegram(user.telegramId, resetToken);
-        logger.info(`Password reset requested for ${email}`);
+        logger.info(`Password reset requested for ${user.email}`);
         res.status(200).json({ message: 'Password reset link sent to Telegram' });
       } catch (telegramError) {
-        logger.warn(`Password reset message not sent to Telegram for ${email}: ${telegramError.message}`);
+        logger.warn(`Password reset message not sent to Telegram for ${user.email}: ${telegramError.message}`);
         res.status(200).json({
           message: 'Password reset link not sent to Telegram. Ensure you sent /start to the bot.',
           email,
@@ -738,7 +764,7 @@ app.post(
       }
     } catch (error) {
       logger.error(`Password reset request error: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -747,12 +773,13 @@ app.post(
 app.post(
   '/api/auth/reset-password/:token',
   [
-    body('password').isLength({ min: 8 }),
-    body('confirmPassword').custom((value, { req }) => value === req.body.password),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Passwords do not match'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
@@ -776,6 +803,7 @@ app.post(
         },
       });
       if (!user) {
+        logger.warn(`Invalid or expired reset token for email: ${decoded.email}`);
         return res.status(400).json({ message: 'Invalid token or expired' });
       }
 
@@ -789,14 +817,14 @@ app.post(
       try {
         await sendTelegramMessage(user.telegramId, `🔑 Your password was reset for email: ${user.email}`);
       } catch (telegramError) {
-        logger.warn(`Failed to send password reset message to Telegram for ${user.email}`);
+        logger.warn(`Failed to send password reset message to Telegram for ${user.email}: ${telegramError.message}`);
       }
 
       logger.info(`Password reset for ${user.email}`);
       res.status(200).json({ message: 'Password reset successfully' });
     } catch (error) {
       logger.error(`Password reset error: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -808,12 +836,13 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
       attributes: { exclude: ['password', 'verificationToken', 'resetPasswordToken', 'resetPasswordExpires', 'jwtToken'] },
     });
     if (!user) {
+      logger.warn(`User not found for ID: ${req.user.id}`);
       return res.status(404).json({ message: 'User not found' });
     }
     res.status(200).json(user);
   } catch (error) {
     logger.error(`Error fetching profile: ${error.message}`);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -821,7 +850,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
 app.post(
   '/api/user/documents',
   authenticateToken,
-  upload.array('documents', 3),
+  upload,
   async (req, res) => {
     try {
       const user = await User.findByPk(req.user.id);
@@ -830,12 +859,12 @@ app.post(
         return res.status(404).json({ message: 'User not found' });
       }
 
-      if (!req.files || req.files.length === 0) {
+      if (!req.files || !req.files.documents || req.files.documents.length === 0) {
         logger.warn('No documents uploaded');
         return res.status(400).json({ message: 'At least one document is required' });
       }
 
-      const newDocuments = req.files.map(file => file.path);
+      const newDocuments = req.files.documents.map(file => file.path);
       user.documents = [...user.documents, ...newDocuments].slice(0, 3);
       user.isVerified = true; // Auto-verify after document upload
       await user.save();
@@ -859,36 +888,41 @@ app.post(
 app.post(
   '/api/apps/create',
   authenticateToken,
-  upload.fields([
-    { name: 'icon', maxCount: 1 },
-    { name: 'apk', maxCount: 1 },
-  ]),
+  upload,
   [
-    body('name').notEmpty().trim(),
-    body('description').notEmpty().trim(),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']),
+    body('name').notEmpty().trim().withMessage('App name is required'),
+    body('description').notEmpty().trim().withMessage('Description is required'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category; must be one of: games, productivity, education, entertainment'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
       return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const user = await User.findByPk(req.user.id);
       if (!user) {
+        logger.warn(`User not found for ID: ${req.user.id}`);
         return res.status(404).json({ message: 'User not found' });
       }
 
       if (!user.isVerified) {
+        logger.warn(`User not verified: ${user.email}`);
         return res.status(403).json({ message: 'Account must be verified to submit apps' });
       }
 
       const { name, description, category } = req.body;
       const files = req.files;
 
-      if (!files || !files.icon || !files.apk) {
-        return res.status(400).json({ message: 'Icon and APK files are required' });
+      if (!files || !files.icon || !files.icon[0]) {
+        logger.warn('Icon file missing');
+        return res.status(400).json({ message: 'Icon file (JPG, JPEG, or PNG) is required' });
+      }
+      if (!files.apk || !files.apk[0]) {
+        logger.warn('APK file missing');
+        return res.status(400).json({ message: 'APK file is required' });
       }
 
       const app = await App.create({
@@ -907,23 +941,28 @@ app.post(
           `🚀 Your app "${name}" has been submitted for review! We'll notify you once it's processed.`
         );
       } catch (telegramError) {
-        logger.warn(`Failed to send app submission message to Telegram for ${user.email}`);
+        logger.warn(`Failed to send app submission message to Telegram for ${user.email}: ${telegramError.message}`);
       }
 
       logger.info(`App created by ${user.email}: ${name}`);
       res.status(201).json({ message: 'App submitted successfully', app });
     } catch (error) {
       logger.error(`Error creating app: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Error handling
+// Error handling middleware
 app.use((err, req, res, next) => {
   logger.error(`Unhandled error: ${err.message}`);
   if (err instanceof multer.MulterError) {
-    return res.status(400).json({ message: 'File upload error: ' + err.message });
+    logger.warn(`Multer error: ${err.message}`);
+    return res.status(400).json({ message: `File upload error: ${err.message}` });
+  }
+  if (err.message.includes('Only')) {
+    logger.warn(`File type error: ${err.message}`);
+    return res.status(400).json({ message: err.message });
   }
   res.status(500).json({ message: 'Server error', error: err.message });
 });
