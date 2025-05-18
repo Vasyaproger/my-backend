@@ -10,6 +10,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
+const fs = require('fs').promises; // For directory creation
 
 const app = express();
 
@@ -33,10 +34,28 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
 
+// Ensure upload directories exist
+const ensureDirectories = async () => {
+  const dirs = [
+    path.join(__dirname, 'Uploads/documents'),
+    path.join(__dirname, 'Uploads/icons'),
+    path.join(__dirname, 'Uploads/apks'),
+  ];
+  for (const dir of dirs) {
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      logger.info(`Created directory: ${dir}`);
+    } catch (error) {
+      logger.error(`Failed to create directory ${dir}: ${error.message}`);
+    }
+  }
+};
+ensureDirectories();
+
 // Database connection
 const sequelize = new Sequelize({
   dialect: 'mysql',
-  host: 'vh438.timeweb.ru',
+  host: process.env.DB_HOST || 'vh438.timeweb.ru',
   username: process.env.DB_USER || 'ch79145_myprojec',
   password: process.env.DB_PASS || 'Vasya11091109',
   database: 'ch79145_myprojec',
@@ -218,16 +237,22 @@ const upload = multer({
 
 // Telegram bot setup
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
-  polling: {
-    interval: 300,
-    autoStart: true,
-    params: { timeout: 10 },
-  },
-});
+let bot;
+try {
+  bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
+    polling: {
+      interval: 300,
+      autoStart: true,
+      params: { timeout: 10 },
+    },
+  });
+  logger.info('Telegram bot initialized');
+} catch (error) {
+  logger.error(`Failed to initialize Telegram bot: ${error.message}`);
+}
 
 // Telegram /start command
-bot.onText(/\/start/, async (msg) => {
+bot?.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const username = msg.from.username || `user_${chatId}`;
   try {
@@ -248,6 +273,9 @@ bot.onText(/\/start/, async (msg) => {
 
 // Resolve Telegram ID
 async function resolveTelegramId(telegramId) {
+  if (!telegramId) {
+    throw new Error('Telegram ID is required');
+  }
   if (/^\d+$/.test(telegramId)) {
     const mapping = await TelegramMapping.findOne({ where: { chatId: telegramId } });
     if (!mapping) {
@@ -265,6 +293,10 @@ async function resolveTelegramId(telegramId) {
 
 // Send Telegram message
 async function sendTelegramMessage(telegramId, message) {
+  if (!bot) {
+    logger.warn('Telegram bot not initialized, skipping message send');
+    return;
+  }
   try {
     const chatId = await resolveTelegramId(telegramId);
     await bot.sendMessage(chatId, message);
@@ -277,6 +309,10 @@ async function sendTelegramMessage(telegramId, message) {
 
 // Send verification message
 async function sendVerificationTelegram(telegramId, email, token) {
+  if (!bot) {
+    logger.warn('Telegram bot not initialized, skipping verification message');
+    return;
+  }
   try {
     const chatId = await resolveTelegramId(telegramId);
     const verificationUrl = `https://vasyaproger-my-backend-9f42.twc1.net/api/auth/verify/${token}`;
@@ -298,6 +334,10 @@ Token: ${token}
 
 // Send password reset message
 async function sendPasswordResetTelegram(telegramId, token) {
+  if (!bot) {
+    logger.warn('Telegram bot not initialized, skipping password reset message');
+    return;
+  }
   try {
     const chatId = await resolveTelegramId(telegramId);
     const resetUrl = `https://vasyaproger-my-backend-9f42.twc1.net/reset-password/${token}`;
@@ -786,10 +826,12 @@ app.post(
     try {
       const user = await User.findByPk(req.user.id);
       if (!user) {
+        logger.warn(`User not found for ID: ${req.user.id}`);
         return res.status(404).json({ message: 'User not found' });
       }
 
       if (!req.files || req.files.length === 0) {
+        logger.warn('No documents uploaded');
         return res.status(400).json({ message: 'At least one document is required' });
       }
 
@@ -801,14 +843,14 @@ app.post(
       try {
         await sendTelegramMessage(user.telegramId, `📄 Your documents were updated for email: ${user.email}`);
       } catch (telegramError) {
-        logger.warn(`Failed to send document update message to Telegram for ${user.email}`);
+        logger.warn(`Failed to send document update message to Telegram for ${user.email}: ${telegramError.message}`);
       }
 
       logger.info(`Documents updated for user ${user.email}`);
       res.status(200).json({ message: 'Documents updated successfully', documents: user.documents });
     } catch (error) {
       logger.error(`Error updating documents: ${error.message}`);
-      res.status(500).json({ message: 'Server error' });
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -883,7 +925,7 @@ app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     return res.status(400).json({ message: 'File upload error: ' + err.message });
   }
-  res.status(500).json({ message: 'Server error' });
+  res.status(500).json({ message: 'Server error', error: err.message });
 });
 
 // Start server
