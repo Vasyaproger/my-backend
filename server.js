@@ -89,7 +89,7 @@ const User = sequelize.define('User', {
   verificationToken: { type: DataTypes.STRING },
   resetPasswordToken: { type: DataTypes.STRING },
   resetPasswordExpires: { type: DataTypes.DATE },
-  jwtToken: { // New field for storing JWT token
+  jwtToken: {
     type: DataTypes.STRING,
     allowNull: true,
   },
@@ -155,7 +155,7 @@ bot.onText(/\/start/, async (msg) => {
       username: `@${username.replace(/^@/, '')}`,
       chatId: chatId.toString(),
     });
-    await bot.sendMessage(chatId, `Ваш Telegram chat ID: ${chatId}\nИспользуйте этот ID при регистрации в PlayEvit.`);
+    await bot.sendMessage(chatId, `Ваш Telegram chat ID: ${chatId}\nИспользуйте этот ID или ваш username (@${username}) при регистрации в PlayEvit.`);
     logger.info(`Захвачен chat ID ${chatId} для username @${username}`);
   } catch (error) {
     logger.error(`Ошибка сохранения маппинга Telegram для chat ID ${chatId}: ${error.message}`);
@@ -168,7 +168,8 @@ async function resolveTelegramId(telegramId) {
   if (/^\d+$/.test(telegramId)) {
     return telegramId;
   }
-  const mapping = await TelegramMapping.findOne({ where: { username: telegramId } });
+  const username = telegramId.startsWith('@') ? telegramId : `@${telegramId}`;
+  const mapping = await TelegramMapping.findOne({ where: { username } });
   if (!mapping) {
     throw new Error(`Chat ID не найден для username ${telegramId}. Пользователь должен отправить /start боту.`);
   }
@@ -176,15 +177,17 @@ async function resolveTelegramId(telegramId) {
 }
 
 // Отправка верификационного сообщения
-async function sendVerificationTelegram(telegramId, token) {
+async function sendVerificationTelegram(telegramId, email, token) {
   try {
     const chatId = await resolveTelegramId(telegramId);
     const verificationUrl = `https://vasyaproger-my-backend-9f42.twc1.net/api/auth/verify/${token}`;
     const message = `
-🌟 Добро пожаловать в PlayEvit! 🌟
-Подтвердите ваш email по ссылке:
+🌟 Добро пожаловать в PlayEvit, ${telegramId}! 🌟
+Подтвердите ваш email (${email}) по ссылке:
 ${verificationUrl}
-🔗 Ссылка действительна 24 часа.
+Или используйте токен в форме верификации на сайте:
+Токен: ${token}
+🔗 Токен действителен 100 лет.
 `;
     logger.info(`Попытка отправки верификационного сообщения на chat ID ${chatId}`);
     await bot.sendMessage(chatId, message);
@@ -205,7 +208,7 @@ async function sendPasswordResetTelegram(telegramId, token) {
 Вы запросили сброс пароля. Перейдите по ссылке:
 ${resetUrl}
 🔗 Ссылка действительна 1 час.
-Если не запрашивали, проигнорируйте.
+Если вы не запрашивали сброс, проигнорируйте это сообщение.
 `;
     logger.info(`Попытка отправки сообщения сброса пароля на chat ID ${chatId}`);
     await bot.sendMessage(chatId, message);
@@ -281,8 +284,12 @@ app.post('/api/auth/register',
 
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
-      const verificationToken = jwt.sign({ email }, process.env.JWT_SECRET || 'your_jwt_secret', { expiresIn: '1d' });
-      
+      const verificationToken = jwt.sign(
+        { email },
+        process.env.JWT_SECRET || 'your_jwt_secret',
+        { expiresIn: '100y' } // Token valid for 100 years
+      );
+
       // Generate JWT token for authentication
       const authToken = jwt.sign(
         { email, accountType, name, telegramId },
@@ -303,27 +310,27 @@ app.post('/api/auth/register',
         addressPostalCode,
         documents: req.files.map(file => file.path),
         verificationToken,
-        jwtToken: authToken, // Store the token in the database
+        jwtToken: authToken,
       });
 
       try {
-        await sendVerificationTelegram(telegramId, verificationToken);
+        await sendVerificationTelegram(telegramId, email, verificationToken);
         logger.info(`Пользователь зарегистрирован: ${email}`);
         res.status(201).json({
-          message: 'Регистрация успешна! Проверьте Telegram для подтверждения.',
-          token: authToken, // Return the token to the client
+          message: 'Регистрация успешна! Проверьте ваш Telegram (@${telegramId}) для подтверждения.',
+          token: authToken,
           user: {
             id: user.id,
             email: user.email,
             accountType: user.accountType,
             name: user.name,
             telegramId: user.telegramId,
-          }
+          },
         });
       } catch (telegramError) {
         logger.warn(`Пользователь зарегистрирован, но сообщение в Telegram не отправлено для ${email}: ${telegramError.message}`);
         res.status(201).json({
-          message: 'Регистрация успешна, но сообщение в Telegram не отправлено. Убедитесь, что вы отправили /start боту.',
+          message: 'Регистрация успешна, но сообщение в Telegram не отправлено. Убедитесь, что вы отправили /start боту с вашим username (@${telegramId}).',
           token: authToken,
           email,
           user: {
@@ -332,7 +339,7 @@ app.post('/api/auth/register',
             accountType: user.accountType,
             name: user.name,
             telegramId: user.telegramId,
-          }
+          },
         });
       }
     } catch (error) {
@@ -342,7 +349,7 @@ app.post('/api/auth/register',
   }
 );
 
-// Верификация email
+// Верификация email через ссылку
 app.get('/api/auth/verify/:token', async (req, res) => {
   try {
     const { token } = req.params;
@@ -354,9 +361,19 @@ app.get('/api/auth/verify/:token', async (req, res) => {
       return res.status(400).json({ message: 'Недействительный или истекший токен' });
     }
 
-    const user = await User.findOne({ where: { email: decoded.email, verificationToken: token } });
+    const user = await User.findOne({ where: { email: decoded.email } });
     if (!user) {
-      return res.status(400).json({ message: 'Пользователь не найден или токен недействителен' });
+      logger.warn(`Пользователь с email ${decoded.email} не найден`);
+      return res.status(400).json({ message: 'Пользователь не найден' });
+    }
+
+    if (user.verificationToken !== token) {
+      logger.warn(`Токен верификации не совпадает для email ${decoded.email}`);
+      return res.status(400).json({ message: 'Токен недействителен' });
+    }
+
+    if (user.isVerified) {
+      return res.status(200).json({ message: 'Email уже подтвержден' });
     }
 
     user.isVerified = true;
@@ -370,6 +387,62 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
+
+// Верификация email через форму
+app.post('/api/auth/verify-form',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('token').notEmpty().trim(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+    }
+
+    try {
+      const { email, token } = req.body;
+
+      let decoded;
+      try {
+        decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+      } catch (error) {
+        logger.warn(`Недействительный токен верификации в форме: ${error.message}`);
+        return res.status(400).json({ message: 'Недействительный или истекший токен' });
+      }
+
+      if (decoded.email !== email) {
+        logger.warn(`Email ${email} не соответствует токену`);
+        return res.status(400).json({ message: 'Токен не соответствует указанному email' });
+      }
+
+      const user = await User.findOne({ where: { email } });
+      if (!user) {
+        logger.warn(`Пользователь с email ${email} не найден`);
+        return res.status(400).json({ message: 'Пользователь не найден' });
+      }
+
+      if (user.verificationToken !== token) {
+        logger.warn(`Токен верификации не совпадает для email ${email}`);
+        return res.status(400).json({ message: 'Токен недействителен' });
+      }
+
+      if (user.isVerified) {
+        return res.status(200).json({ message: 'Email уже подтвержден' });
+      }
+
+      user.isVerified = true;
+      user.verificationToken = null;
+      await user.save();
+
+      logger.info(`Email верифицирован через форму для ${user.email}`);
+      res.status(200).json({ message: 'Email успешно подтвержден!' });
+    } catch (error) {
+      logger.error(`Ошибка верификации через форму: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера' });
+    }
+  }
+);
 
 // Вход в систему
 app.post('/api/auth/login',
@@ -399,10 +472,9 @@ app.post('/api/auth/login',
       }
 
       if (!user.isVerified) {
-        return res.status(400).json({ message: 'Подтвердите ваш email через Telegram перед входом' });
+        return res.status(400).json({ message: 'Подтвердите ваш email через Telegram или форму на сайте' });
       }
 
-      // Use existing token if available, or generate new one
       let token = user.jwtToken;
       if (!token) {
         token = jwt.sign(
@@ -511,7 +583,7 @@ app.post('/api/auth/reset-password/:token',
       user.password = await bcrypt.hash(password, salt);
       user.resetPasswordToken = null;
       user.resetPasswordExpires = null;
-      user.jwtToken = null; // Invalidate existing token on password reset
+      user.jwtToken = null;
       await user.save();
 
       logger.info(`Пароль сброшен для ${user.email}`);
