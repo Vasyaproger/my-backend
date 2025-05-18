@@ -136,47 +136,64 @@ const upload = multer({
 
 // Nodemailer setup
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // Use TLS
   auth: {
-    user: 'your_email@gmail.com', // Replace with your Gmail address
-    pass: 'your_email_app_password', // Replace with your Gmail app-specific password
+    user: 'your_email@gmail.com', // REPLACE with your Gmail address
+    pass: 'your_email_app_password', // REPLACE with your Gmail app-specific password
+  },
+  tls: {
+    rejectUnauthorized: false, // For testing; remove in production
   },
 });
 
 // Email functions
 async function sendVerificationEmail(email, token) {
-  const verificationUrl = `http://localhost:3000/api/auth/verify/${token}`;
-  const mailOptions = {
-    from: 'your_email@gmail.com',
-    to: email,
-    subject: 'Подтверждение регистрации в PlayEvit',
-    html: `
-      <h2>Добро пожаловать в PlayEvit!</h2>
-      <p>Пожалуйста, подтвердите ваш email, перейдя по ссылке:</p>
-      <a href="${verificationUrl}" style="padding: 10px 20px; background-color: #2563eb; color: white; text-decoration: none; border-radius: 5px;">Подтвердить email</a>
-      <p>Ссылка действительна 24 часа.</p>
-    `,
-  };
-  await transporter.sendMail(mailOptions);
-  logger.info(`Verification email sent to ${email}`);
+  try {
+    const verificationUrl = `http://localhost:3000/api/auth/verify/${token}`;
+    const mailOptions = {
+      from: 'your_email@gmail.com',
+      to: email,
+      subject: 'Подтверждение регистрации в PlayEvit',
+      html: `
+        <h2>Добро пожаловать в PlayEvit!</h2>
+        <p>Пожалуйста, подтвердите ваш email, перейдя по ссылке:</p>
+        <a href="${verificationUrl}" style="padding: 10px 20px; background-color: #2563eb; color: white; text-decoration: none; border-radius: 5px;">Подтвердить email</a>
+        <p>Ссылка действительна 24 часа.</p>
+      `,
+    };
+    logger.info(`Attempting to send verification email to ${email}`);
+    const info = await transporter.sendMail(mailOptions);
+    logger.info(`Verification email sent to ${email}: ${info.messageId}`);
+  } catch (error) {
+    logger.error(`Failed to send verification email to ${email}: ${error.message}`);
+    throw error;
+  }
 }
 
 async function sendPasswordResetEmail(email, token) {
-  const resetUrl = `http://localhost:3000/reset-password/${token}`;
-  const mailOptions = {
-    from: 'your_email@gmail.com',
-    to: email,
-    subject: 'Сброс пароля в PlayEvit',
-    html: `
-      <h2>Сброс пароля</h2>
-      <p>Вы запросили сброс пароля. Перейдите по ссылке, чтобы установить новый пароль:</p>
-      <a href="${resetUrl}" style="padding: 10px 20px; background-color: #2563eb; color: white; text-decoration: none; border-radius: 5px;">Сбросить пароль</a>
-      <p>Ссылка действительна 1 час.</p>
-      <p>Если вы не запрашивали сброс, проигнорируйте это письмо.</p>
-    `,
-  };
-  await transporter.sendMail(mailOptions);
-  logger.info(`Password reset email sent to ${email}`);
+  try {
+    const resetUrl = `http://localhost:3000/reset-password/${token}`;
+    const mailOptions = {
+      from: 'your_email@gmail.com',
+      to: email,
+      subject: 'Сброс пароля в PlayEvit',
+      html: `
+        <h2>Сброс пароля</h2>
+        <p>Вы запросили сброс пароля. Перейдите по ссылке, чтобы установить новый пароль:</p>
+        <a href="${resetUrl}" style="padding: 10px 20px; background-color: #2563eb; color: white; text-decoration: none; border-radius: 5px;">Сбросить пароль</a>
+        <p>Ссылка действительна 1 час.</p>
+        <p>Если вы не запрашивали сброс, проигнорируйте это письмо.</p>
+      `,
+    };
+    logger.info(`Attempting to send password reset email to ${email}`);
+    const info = await transporter.sendMail(mailOptions);
+    logger.info(`Password reset email sent to ${email}: ${info.messageId}`);
+  } catch (error) {
+    logger.error(`Failed to send password reset email to ${email}: ${error.message}`);
+    throw error;
+  }
 }
 
 // Middleware to authenticate JWT
@@ -187,7 +204,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ message: 'Требуется токен авторизации' });
   }
   try {
-    const decoded = jwt.verify(token, 'your_jwt_secret');
+    const decoded = jwt.verify(token, 'your_jwt_secret'); // REPLACE with a secure random string in production
     req.user = decoded;
     next();
   } catch (error) {
@@ -254,10 +271,17 @@ app.post('/api/auth/register',
         verificationToken,
       });
 
-      await sendVerificationEmail(email, verificationToken);
-      logger.info(`User registered: ${email}`);
-
-      res.status(201).json({ message: 'Регистрация успешна! Проверьте email для подтверждения.' });
+      try {
+        await sendVerificationEmail(email, verificationToken);
+        logger.info(`User registered: ${email}`);
+        res.status(201).json({ message: 'Регистрация успешна! Проверьте email для подтверждения.' });
+      } catch (emailError) {
+        logger.warn(`User registered but email failed for ${email}: ${emailError.message}`);
+        res.status(201).json({
+          message: 'Регистрация успешна, но письмо для подтверждения не отправлено. Свяжитесь с поддержкой.',
+          email,
+        });
+      }
     } catch (error) {
       logger.error(`Registration error: ${error.message}`);
       res.status(500).json({ message: 'Ошибка сервера' });
@@ -355,7 +379,8 @@ app.post('/api/auth/forgot-password',
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+     return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+
     }
 
     try {
@@ -370,10 +395,17 @@ app.post('/api/auth/forgot-password',
       user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour
       await user.save();
 
-      await sendPasswordResetEmail(email, resetToken);
-      logger.info(`Password reset requested for ${email}`);
-
-      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена на ваш email' });
+      try {
+        await sendPasswordResetEmail(email, resetToken);
+        logger.info(`Password reset requested for ${email}`);
+        res.status(200).json({ message: 'Ссылка для сброса пароля отправлена на ваш email' });
+      } catch (emailError) {
+        logger.warn(`Password reset email failed for ${email}: ${emailError.message}`);
+        res.status(200).json({
+          message: 'Ссылка для сброса пароля не отправлена. Свяжитесь с поддержкой.',
+          email,
+        });
+      }
     } catch (error) {
       logger.error(`Forgot password error: ${error.message}`);
       res.status(500).json({ message: 'Ошибка сервера' });
@@ -437,7 +469,6 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
     const user = await User.findByPk(req.user.id, {
       attributes: { exclude: ['password', 'verificationToken', 'resetPasswordToken', 'resetPasswordExpires'] },
     });
-   幼儿园
     if (!user) {
       return res.status(404).json({ message: 'Пользователь не найден' });
     }
