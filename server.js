@@ -6,10 +6,6 @@ const nodemailer = require('nodemailer');
 const multer = require('multer');
 const path = require('path');
 const cors = require('cors');
-const dotenv = require('dotenv');
-
-// Загружаем переменные окружения
-dotenv.config();
 
 const app = express();
 
@@ -21,11 +17,11 @@ app.use('/uploads', express.static('uploads'));
 // Настройка MySQL
 const sequelize = new Sequelize({
   dialect: 'mysql',
-  host: process.env.DB_HOST || 'localhost',
-  username: process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
+  host: 'vh438.timeweb.ru',
+  username: 'ch79145_myprojec',
+  password: 'Vasya11091109',
+  database: 'ch79145_myprojec',
+  port: 3306,
 });
 
 // Модель пользователя
@@ -104,16 +100,16 @@ const upload = multer({
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    user: 'your_email@gmail.com',
+    pass: 'your_email_app_password',
   },
 });
 
 // Функция отправки email
 async function sendVerificationEmail(email, token) {
-  const verificationUrl = `${process.env.FRONTEND_URL}/api/auth/verify/${token}`;
+  const verificationUrl = `http://localhost:3000/api/auth/verify/${token}`;
   const mailOptions = {
-    from: process.env.EMAIL_USER,
+    from: 'your_email@gmail.com',
     to: email,
     subject: 'Подтверждение регистрации в PlayEvit',
     html: `
@@ -140,7 +136,7 @@ app.post('/api/auth/register', upload.array('documents', 3), async (req, res) =>
       accountType,
       name,
       phone,
-      addressStreet,
+  addressStreet,
       addressCity,
       addressCountry,
       addressPostalCode,
@@ -168,7 +164,7 @@ app.post('/api/auth/register', upload.array('documents', 3), async (req, res) =>
     const hashedPassword = await bcrypt.hash(password, salt);
 
     // Создание токена верификации
-    const verificationToken = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '1d' });
+    const verificationToken = jwt.sign({ email }, 'your_jwt_secret', { expiresIn: '1d' });
 
     // Сохранение пользователя
     const user = await User.create({
@@ -201,7 +197,7 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     const { token } = req.params;
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
+      decoded = jwt.verify(token, 'your_jwt_secret');
     } catch (error) {
       return res.status(400).json({ message: 'Недействительный или истекший токен' });
     }
@@ -250,7 +246,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Создание JWT
-    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, email: user.email }, 'your_jwt_secret', { expiresIn: '7d' });
 
     res.status(200).json({ token, message: 'Вход успешен' });
   } catch (error) {
@@ -260,5 +256,5 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Запуск сервера
-const PORT = process.env.PORT || 5000;
+const PORT = 5000;
 app.listen(PORT, () => console.log(`Сервер запущен на порту ${PORT}`));
