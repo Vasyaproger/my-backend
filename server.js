@@ -287,10 +287,9 @@ app.post('/api/auth/register',
       const verificationToken = jwt.sign(
         { email },
         process.env.JWT_SECRET || 'your_jwt_secret',
-        { expiresIn: '100y' } // Token valid for 100 years
+        { expiresIn: '100y' }
       );
 
-      // Generate JWT token for authentication
       const authToken = jwt.sign(
         { email, accountType, name, telegramId },
         process.env.JWT_SECRET || 'your_jwt_secret',
@@ -469,10 +468,6 @@ app.post('/api/auth/login',
       if (!isMatch) {
         logger.warn(`Неверный пароль для email: ${email}`);
         return res.status(400).json({ message: 'Неверный email или пароль' });
-      }
-
-      if (!user.isVerified) {
-        return res.status(400).json({ message: 'Подтвердите ваш email через Telegram или форму на сайте' });
       }
 
       let token = user.jwtToken;
