@@ -1,3 +1,4 @@
+// Сервер для PlayEvit — платформы для стартапов и начинающих разработчиков
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
 const mysql2 = require('mysql2');
@@ -13,7 +14,7 @@ const winston = require('winston');
 
 const app = express();
 
-// Настройка логгера
+// Настройка логгера для записи ошибок и логов
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -27,13 +28,13 @@ const logger = winston.createLogger({
   ],
 });
 
-// Middleware
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads')));
+// Middleware для безопасности и обработки запросов
+app.use(helmet()); // Защита от уязвимостей
+app.use(cors()); // Разрешение кросс-доменных запросов
+app.use(express.json()); // Парсинг JSON
+app.use('/uploads', express.static(path.join(__dirname, 'Uploads'))); // Статическая папка для файлов
 
-// Настройка подключения к MySQL
+// Подключение к базе данных MySQL
 const sequelize = new Sequelize({
   dialect: 'mysql',
   host: 'vh438.timeweb.ru',
@@ -98,7 +99,24 @@ const User = sequelize.define('User', {
   tableName: 'Users',
 });
 
-// Модель для Telegram маппинга
+// Модель для предварительной регистрации
+const PreRegister = sequelize.define('PreRegister', {
+  email: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true,
+    validate: { isEmail: true },
+  },
+  telegramId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+}, {
+  timestamps: true,
+  tableName: 'PreRegisters',
+});
+
+// Модель для маппинга Telegram
 const TelegramMapping = sequelize.define('TelegramMapping', {
   username: {
     type: DataTypes.STRING,
@@ -124,7 +142,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 }, // Максимум 5 МБ
   fileFilter: (req, file, cb) => {
     const filetypes = /pdf|jpg|jpeg|png/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
@@ -155,7 +173,10 @@ bot.onText(/\/start/, async (msg) => {
       username: `@${username.replace(/^@/, '')}`,
       chatId: chatId.toString(),
     });
-    await bot.sendMessage(chatId, `Ваш Telegram chat ID: ${chatId}\nИспользуйте этот ID или ваш username (@${username}) при регистрации в PlayEvit.`);
+    await bot.sendMessage(
+      chatId,
+      `🌟 Добро пожаловать в PlayEvit!\nВаш Telegram chat ID: ${chatId}\nИспользуйте этот ID или ваш username (@${username}) при регистрации.\nМы будем отправлять вам уведомления сюда!`
+    );
     logger.info(`Захвачен chat ID ${chatId} для username @${username}`);
   } catch (error) {
     logger.error(`Ошибка сохранения маппинга Telegram для chat ID ${chatId}: ${error.message}`);
@@ -163,17 +184,33 @@ bot.onText(/\/start/, async (msg) => {
   }
 });
 
-// Функция преобразования Telegram ID
+// Преобразование Telegram ID в chatId
 async function resolveTelegramId(telegramId) {
   if (/^\d+$/.test(telegramId)) {
+    const mapping = await TelegramMapping.findOne({ where: { chatId: telegramId } });
+    if (!mapping) {
+      throw new Error(`Chat ID ${telegramId} не найден. Отправьте /start боту.`);
+    }
     return telegramId;
   }
   const username = telegramId.startsWith('@') ? telegramId : `@${telegramId}`;
   const mapping = await TelegramMapping.findOne({ where: { username } });
   if (!mapping) {
-    throw new Error(`Chat ID не найден для username ${telegramId}. Пользователь должен отправить /start боту.`);
+    throw new Error(`Username ${telegramId} не найден. Отправьте /start боту.`);
   }
   return mapping.chatId;
+}
+
+// Отправка сообщения в Telegram
+async function sendTelegramMessage(telegramId, message) {
+  try {
+    const chatId = await resolveTelegramId(telegramId);
+    await bot.sendMessage(chatId, message);
+    logger.info(`Сообщение отправлено на chat ID ${chatId}`);
+  } catch (error) {
+    logger.error(`Ошибка отправки сообщения на Telegram ID ${telegramId}: ${error.message}`);
+    throw error;
+  }
 }
 
 // Отправка верификационного сообщения
@@ -189,7 +226,6 @@ ${verificationUrl}
 Токен: ${token}
 🔗 Токен действителен 100 лет.
 `;
-    logger.info(`Попытка отправки верификационного сообщения на chat ID ${chatId}`);
     await bot.sendMessage(chatId, message);
     logger.info(`Верификационное сообщение отправлено на chat ID ${chatId}`);
   } catch (error) {
@@ -210,7 +246,6 @@ ${resetUrl}
 🔗 Ссылка действительна 1 час.
 Если вы не запрашивали сброс, проигнорируйте это сообщение.
 `;
-    logger.info(`Попытка отправки сообщения сброса пароля на chat ID ${chatId}`);
     await bot.sendMessage(chatId, message);
     logger.info(`Сообщение сброса пароля отправлено на chat ID ${chatId}`);
   } catch (error) {
@@ -245,8 +280,55 @@ sequelize.sync({ alter: true }).then(() => {
 
 // Маршруты
 
+// Предварительная регистрация
+app.post(
+  '/api/pre-register',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('telegramId').optional().trim().custom((value) => {
+      if (!value || /^\d+$/.test(value) || /^@/.test(value)) {
+        return true;
+      }
+      throw new Error('Telegram ID должен быть числовым chat ID или username с @');
+    }),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+    }
+
+    try {
+      const { email, telegramId } = req.body;
+
+      const existingPreRegister = await PreRegister.findOne({ where: { email } });
+      if (existingPreRegister) {
+        return res.status(400).json({ message: 'Этот email уже записан в лист ожидания' });
+      }
+
+      const preRegister = await PreRegister.create({ email, telegramId });
+
+      let message = `🌟 Спасибо за интерес к PlayEvit!\nВаш email (${email}) добавлен в лист ожидания.\nМы сообщим вам о запуске в 2025 году!`;
+      if (telegramId) {
+        try {
+          await sendTelegramMessage(telegramId, message);
+        } catch (error) {
+          message = 'Мы не смогли отправить сообщение в Telegram. Убедитесь, что вы отправили /start боту.';
+        }
+      }
+
+      logger.info(`Предварительная регистрация: ${email}`);
+      res.status(201).json({ message });
+    } catch (error) {
+      logger.error(`Ошибка предварительной регистрации: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера' });
+    }
+  }
+);
+
 // Регистрация пользователя
-app.post('/api/auth/register',
+app.post(
+  '/api/auth/register',
   upload.array('documents', 3),
   [
     body('email').isEmail().normalizeEmail(),
@@ -316,7 +398,7 @@ app.post('/api/auth/register',
         await sendVerificationTelegram(telegramId, email, verificationToken);
         logger.info(`Пользователь зарегистрирован: ${email}`);
         res.status(201).json({
-          message: 'Регистрация успешна! Проверьте ваш Telegram (@${telegramId}) для подтверждения.',
+          message: `Регистрация успешна! Проверьте ваш Telegram (${telegramId}) для подтверждения.`,
           token: authToken,
           user: {
             id: user.id,
@@ -327,11 +409,10 @@ app.post('/api/auth/register',
           },
         });
       } catch (telegramError) {
-        logger.warn(`Пользователь зарегистрирован, но сообщение в Telegram не отправлено для ${email}: ${telegramError.message}`);
+        logger.warn(`Сообщение в Telegram не отправлено для ${email}: ${telegramError.message}`);
         res.status(201).json({
-          message: 'Регистрация успешна, но сообщение в Telegram не отправлено. Убедитесь, что вы отправили /start боту с вашим username (@${telegramId}).',
+          message: `Регистрация успешна, но сообщение в Telegram не отправлено. Отправьте /start боту с вашим ${telegramId}.`,
           token: authToken,
-          email,
           user: {
             id: user.id,
             email: user.email,
@@ -379,6 +460,12 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     user.verificationToken = null;
     await user.save();
 
+    try {
+      await sendTelegramMessage(user.telegramId, `✅ Ваш email (${user.email}) успешно подтвержден! Добро пожаловать в PlayEvit!`);
+    } catch (telegramError) {
+      logger.warn(`Не удалось отправить сообщение верификации в Telegram для ${user.email}`);
+    }
+
     logger.info(`Email верифицирован для ${user.email}`);
     res.status(200).json({ message: 'Email успешно подтвержден!' });
   } catch (error) {
@@ -388,7 +475,8 @@ app.get('/api/auth/verify/:token', async (req, res) => {
 });
 
 // Верификация email через форму
-app.post('/api/auth/verify-form',
+app.post(
+  '/api/auth/verify-form',
   [
     body('email').isEmail().normalizeEmail(),
     body('token').notEmpty().trim(),
@@ -434,6 +522,12 @@ app.post('/api/auth/verify-form',
       user.verificationToken = null;
       await user.save();
 
+      try {
+        await sendTelegramMessage(user.telegramId, `✅ Ваш email (${user.email}) успешно подтвержден! Добро пожаловать в PlayEvit!`);
+      } catch (telegramError) {
+        logger.warn(`Не удалось отправить сообщение верификации в Telegram для ${user.email}`);
+      }
+
       logger.info(`Email верифицирован через форму для ${user.email}`);
       res.status(200).json({ message: 'Email успешно подтвержден!' });
     } catch (error) {
@@ -444,7 +538,8 @@ app.post('/api/auth/verify-form',
 );
 
 // Вход в систему
-app.post('/api/auth/login',
+app.post(
+  '/api/auth/login',
   [
     body('email').isEmail().normalizeEmail(),
     body('password').notEmpty(),
@@ -481,6 +576,12 @@ app.post('/api/auth/login',
         await user.save();
       }
 
+      try {
+        await sendTelegramMessage(user.telegramId, `🔐 Вы вошли в PlayEvit с email: ${email}`);
+      } catch (telegramError) {
+        logger.warn(`Не удалось отправить сообщение входа в Telegram для ${email}`);
+      }
+
       logger.info(`Пользователь вошел: ${email}`);
       res.status(200).json({
         token,
@@ -501,7 +602,8 @@ app.post('/api/auth/login',
 );
 
 // Запрос сброса пароля
-app.post('/api/auth/forgot-password',
+app.post(
+  '/api/auth/forgot-password',
   [body('email').isEmail().normalizeEmail()],
   async (req, res) => {
     const errors = validationResult(req);
@@ -540,7 +642,8 @@ app.post('/api/auth/forgot-password',
 );
 
 // Сброс пароля
-app.post('/api/auth/reset-password/:token',
+app.post(
+  '/api/auth/reset-password/:token',
   [
     body('password').isLength({ min: 8 }),
     body('confirmPassword').custom((value, { req }) => value === req.body.password),
@@ -581,6 +684,12 @@ app.post('/api/auth/reset-password/:token',
       user.jwtToken = null;
       await user.save();
 
+      try {
+        await sendTelegramMessage(user.telegramId, `🔑 Ваш пароль успешно сброшен для email: ${user.email}`);
+      } catch (telegramError) {
+        logger.warn(`Не удалось отправить сообщение сброса пароля в Telegram для ${user.email}`);
+      }
+
       logger.info(`Пароль сброшен для ${user.email}`);
       res.status(200).json({ message: 'Пароль успешно сброшен' });
     } catch (error) {
@@ -607,7 +716,8 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
 });
 
 // Обновление документов
-app.post('/api/user/documents',
+app.post(
+  '/api/user/documents',
   authenticateToken,
   upload.array('documents', 3),
   async (req, res) => {
@@ -624,6 +734,12 @@ app.post('/api/user/documents',
       const newDocuments = req.files.map(file => file.path);
       user.documents = [...user.documents, ...newDocuments].slice(0, 3);
       await user.save();
+
+      try {
+        await sendTelegramMessage(user.telegramId, `📄 Ваши документы обновлены для email: ${user.email}`);
+      } catch (telegramError) {
+        logger.warn(`Не удалось отправить сообщение об обновлении документов в Telegram для ${user.email}`);
+      }
 
       logger.info(`Документы обновлены для пользователя ${user.email}`);
       res.status(200).json({ message: 'Документы успешно обновлены', documents: user.documents });
