@@ -3,7 +3,7 @@ const { Sequelize, DataTypes } = require('sequelize');
 const mysql2 = require('mysql2');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
+const TelegramBot = require('node-telegram-bot-api');
 const multer = require('multer');
 const path = require('path');
 const cors = require('cors');
@@ -77,6 +77,10 @@ const User = sequelize.define('User', {
     type: DataTypes.STRING,
     allowNull: false,
   },
+  telegramId: {
+    type: DataTypes.STRING,
+    allowNull: false, // Stores Telegram chat ID (numeric string)
+  },
   addressStreet: {
     type: DataTypes.STRING,
   },
@@ -112,6 +116,22 @@ const User = sequelize.define('User', {
   tableName: 'Users',
 });
 
+// TelegramMapping model to store username-to-chat-ID mappings
+const TelegramMapping = sequelize.define('TelegramMapping', {
+  username: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true,
+  },
+  chatId: {
+    type: DataTypes.STRING,
+    allowNull: false,
+  },
+}, {
+  timestamps: true,
+  tableName: 'TelegramMappings',
+});
+
 // Multer setup
 const storage = multer.diskStorage({
   destination: './Uploads/documents/',
@@ -134,64 +154,77 @@ const upload = multer({
   },
 });
 
-// Nodemailer setup
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // Use TLS
-  auth: {
-    user: 'your_email@gmail.com', // REPLACE with your Gmail address
-    pass: 'your_email_app_password', // REPLACE with your Gmail app-specific password
-  },
-  tls: {
-    rejectUnauthorized: false, // For testing; remove in production
-  },
+// Telegram Bot setup
+const TELEGRAM_BOT_TOKEN = '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY'; // Secure this in production (e.g., use environment variables)
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true }); // Enable polling to handle /start command
+
+// Handle /start command to capture chat ID
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const username = msg.from.username || `user_${chatId}`; // Fallback if no username
+  try {
+    await TelegramMapping.upsert({
+      username: `@${username.replace(/^@/, '')}`,
+      chatId: chatId.toString(),
+    });
+    await bot.sendMessage(chatId, `Ваш Telegram chat ID: ${chatId}\nИспользуйте этот ID при регистрации в PlayEvit.`);
+    logger.info(`Captured chat ID ${chatId} for username @${username}`);
+  } catch (error) {
+    logger.error(`Error saving Telegram mapping for chat ID ${chatId}: ${error.message}`);
+    await bot.sendMessage(chatId, 'Ошибка при сохранении вашего chat ID. Пожалуйста, попробуйте снова или свяжитесь с поддержкой.');
+  }
 });
 
-// Email functions
-async function sendVerificationEmail(email, token) {
+// Resolve telegramId to chatId
+async function resolveTelegramId(telegramId) {
+  // Check if telegramId is a numeric chat ID
+  if (/^\d+$/.test(telegramId)) {
+    return telegramId;
+  }
+  // Otherwise, treat as username and look up chat ID
+  const mapping = await TelegramMapping.findOne({ where: { username: telegramId } });
+  if (!mapping) {
+    throw new Error(`Chat ID not found for username ${telegramId}. User must send /start to the bot.`);
+  }
+  return mapping.chatId;
+}
+
+// Telegram message functions
+async function sendVerificationTelegram(telegramId, token) {
   try {
-    const verificationUrl = `http://localhost:3000/api/auth/verify/${token}`;
-    const mailOptions = {
-      from: 'your_email@gmail.com',
-      to: email,
-      subject: 'Подтверждение регистрации в PlayEvit',
-      html: `
-        <h2>Добро пожаловать в PlayEvit!</h2>
-        <p>Пожалуйста, подтвердите ваш email, перейдя по ссылке:</p>
-        <a href="${verificationUrl}" style="padding: 10px 20px; background-color: #2563eb; color: white; text-decoration: none; border-radius: 5px;">Подтвердить email</a>
-        <p>Ссылка действительна 24 часа.</p>
-      `,
-    };
-    logger.info(`Attempting to send verification email to ${email}`);
-    const info = await transporter.sendMail(mailOptions);
-    logger.info(`Verification email sent to ${email}: ${info.messageId}`);
+    const chatId = await resolveTelegramId(telegramId);
+    const verificationUrl = `https://vasyaproger-my-backend-9f42.twc1.net/api/auth/verify/${token}`;
+    const message = `
+🌟 Добро пожаловать в PlayEvit! 🌟
+Пожалуйста, подтвердите ваш email, перейдя по ссылке:
+${verificationUrl}
+🔗 Ссылка действительна 24 часа.
+`;
+    logger.info(`Attempting to send verification message to Telegram chat ID ${chatId}`);
+    await bot.sendMessage(chatId, message);
+    logger.info(`Verification message sent to Telegram chat ID ${chatId}`);
   } catch (error) {
-    logger.error(`Failed to send verification email to ${email}: ${error.message}`);
+    logger.error(`Failed to send verification message to Telegram ID ${telegramId}: ${error.message}`);
     throw error;
   }
 }
 
-async function sendPasswordResetEmail(email, token) {
+async function sendPasswordResetTelegram(telegramId, token) {
   try {
-    const resetUrl = `http://localhost:3000/reset-password/${token}`;
-    const mailOptions = {
-      from: 'your_email@gmail.com',
-      to: email,
-      subject: 'Сброс пароля в PlayEvit',
-      html: `
-        <h2>Сброс пароля</h2>
-        <p>Вы запросили сброс пароля. Перейдите по ссылке, чтобы установить новый пароль:</p>
-        <a href="${resetUrl}" style="padding: 10px 20px; background-color: #2563eb; color: white; text-decoration: none; border-radius: 5px;">Сбросить пароль</a>
-        <p>Ссылка действительна 1 час.</p>
-        <p>Если вы не запрашивали сброс, проигнорируйте это письмо.</p>
-      `,
-    };
-    logger.info(`Attempting to send password reset email to ${email}`);
-    const info = await transporter.sendMail(mailOptions);
-    logger.info(`Password reset email sent to ${email}: ${info.messageId}`);
+    const chatId = await resolveTelegramId(telegramId);
+    const resetUrl = `https://vasyaproger-my-backend-9f42.twc1.net/reset-password/${token}`;
+    const message = `
+🔐 Сброс пароля в PlayEvit 🔐
+Вы запросили сброс пароля. Перейдите по ссылке, чтобы установить новый пароль:
+${resetUrl}
+🔗 Ссылка действительна 1 час.
+Если вы не запрашивали сброс, проигнорируйте это сообщение.
+`;
+    logger.info(`Attempting to send password reset message to Telegram chat ID ${chatId}`);
+    await bot.sendMessage(chatId, message);
+    logger.info(`Password reset message sent to Telegram chat ID ${chatId}`);
   } catch (error) {
-    logger.error(`Failed to send password reset email to ${email}: ${error.message}`);
+    logger.error(`Failed to send password reset message to Telegram ID ${telegramId}: ${error.message}`);
     throw error;
   }
 }
@@ -214,7 +247,7 @@ const authenticateToken = (req, res, next) => {
 };
 
 // Database sync
-sequelize.sync({ force: false }).then(() => {
+sequelize.sync({ alter: true }).then(() => {
   logger.info('Database synchronized');
 }).catch((error) => {
   logger.error(`Database sync failed: ${error.message}`);
@@ -231,6 +264,13 @@ app.post('/api/auth/register',
     body('accountType').isIn(['individual', 'commercial']),
     body('name').notEmpty().trim(),
     body('phone').notEmpty().trim(),
+    body('telegramId').notEmpty().trim().custom((value) => {
+      // Allow numeric chat ID or username starting with @
+      if (/^\d+$/.test(value) || /^@/.test(value)) {
+        return true;
+      }
+      throw new Error('Telegram ID должен быть числовым chat ID или username, начинающимся с @');
+    }),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -240,7 +280,7 @@ app.post('/api/auth/register',
 
     try {
       const {
-        email, password, accountType, name, phone,
+        email, password, accountType, name, phone, telegramId,
         addressStreet, addressCity, addressCountry, addressPostalCode,
       } = req.body;
 
@@ -263,6 +303,7 @@ app.post('/api/auth/register',
         accountType,
         name,
         phone,
+        telegramId,
         addressStreet,
         addressCity,
         addressCountry,
@@ -272,13 +313,13 @@ app.post('/api/auth/register',
       });
 
       try {
-        await sendVerificationEmail(email, verificationToken);
+        await sendVerificationTelegram(telegramId, verificationToken);
         logger.info(`User registered: ${email}`);
-        res.status(201).json({ message: 'Регистрация успешна! Проверьте email для подтверждения.' });
-      } catch (emailError) {
-        logger.warn(`User registered but email failed for ${email}: ${emailError.message}`);
+        res.status(201).json({ message: 'Регистрация успешна! Проверьте Telegram для подтверждения.' });
+      } catch (telegramError) {
+        logger.warn(`User registered but Telegram message failed for ${email}: ${telegramError.message}`);
         res.status(201).json({
-          message: 'Регистрация успешна, но письмо для подтверждения не отправлено. Свяжитесь с поддержкой.',
+          message: 'Регистрация успешна, но сообщение в Telegram не отправлено. Убедитесь, что вы отправили /start боту, или свяжитесь с поддержкой.',
           email,
         });
       }
@@ -346,7 +387,7 @@ app.post('/api/auth/login',
       }
 
       if (!user.isVerified) {
-        return res.status(400).json({ message: 'Подтвердите ваш email перед входом' });
+        return res.status(400).json({ message: 'Подтвердите ваш email через Telegram перед входом' });
       }
 
       const token = jwt.sign(
@@ -363,6 +404,7 @@ app.post('/api/auth/login',
           email: user.email,
           accountType: user.accountType,
           name: user.name,
+          telegramId: user.telegramId,
         },
         message: 'Вход успешен',
       });
@@ -379,8 +421,7 @@ app.post('/api/auth/forgot-password',
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-     return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
-
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
@@ -396,13 +437,13 @@ app.post('/api/auth/forgot-password',
       await user.save();
 
       try {
-        await sendPasswordResetEmail(email, resetToken);
+        await sendPasswordResetTelegram(user.telegramId, resetToken);
         logger.info(`Password reset requested for ${email}`);
-        res.status(200).json({ message: 'Ссылка для сброса пароля отправлена на ваш email' });
-      } catch (emailError) {
-        logger.warn(`Password reset email failed for ${email}: ${emailError.message}`);
+        res.status(200).json({ message: 'Ссылка для сброса пароля отправлена в Telegram' });
+      } catch (telegramError) {
+        logger.warn(`Password reset Telegram message failed for ${email}: ${telegramError.message}`);
         res.status(200).json({
-          message: 'Ссылка для сброса пароля не отправлена. Свяжитесь с поддержкой.',
+          message: 'Ссылка для сброса пароля не отправлена в Telegram. Убедитесь, что вы отправили /start боту, или свяжитесь с поддержкой.',
           email,
         });
       }
