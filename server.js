@@ -1,6 +1,6 @@
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
-const mysql = require('mysql'); // Замена mysql2 на mysql
+const mysql = require('mysql');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const TelegramBot = require('node-telegram-bot-api');
@@ -13,6 +13,16 @@ const winston = require('winston');
 const AWS = require('aws-sdk');
 
 const app = express();
+
+// Environment variables for sensitive data
+const JWT_SECRET = process.env.JWT_SECRET || 'your_secure_random_string_32_chars';
+const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
+const DB_USER = process.env.DB_USER || 'ch79145_project';
+const DB_PASSWORD = process.env.DB_PASSWORD || 'Vasya11091109';
+const DB_NAME = process.env.DB_NAME || 'ch79145_project';
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'DN1NLZTORA2L6NZ529JJ';
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
 
 // Logger setup
 const logger = winston.createLogger({
@@ -31,8 +41,8 @@ const logger = winston.createLogger({
 // AWS S3 setup
 const s3 = new AWS.S3({
   endpoint: 'https://s3.twcstorage.ru',
-  accessKeyId: 'DN1NLZTORA2L6NZ529JJ',
-  secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
+  accessKeyId: S3_ACCESS_KEY,
+  secretAccessKey: S3_SECRET_KEY,
   region: 'ru-1',
   s3ForcePathStyle: true,
   httpOptions: { timeout: 30000 },
@@ -61,15 +71,15 @@ app.use(express.json());
 // Database connection
 const sequelize = new Sequelize({
   dialect: 'mysql',
-  host: 'vh438.timeweb.ru',
-  username: 'ch79145_project',
-  password: 'Vasya11091109',
-  database: 'ch79145_project',
+  host: DB_HOST,
+  username: DB_USER,
+  password: DB_PASSWORD,
+  database: DB_NAME,
   port: 3306,
-  dialectModule: mysql, // Используем mysql вместо mysql2
+  dialectModule: mysql,
   logging: (msg) => logger.debug(msg),
   pool: {
-    max: 2, // Уменьшено до 2 для снижения нагрузки
+    max: 2,
     min: 0,
     acquire: 30000,
     idle: 10000,
@@ -77,7 +87,8 @@ const sequelize = new Sequelize({
 });
 
 // Connection retry mechanism
-async function connectWithRetry(maxRetries = 5, retryDelay = 20000) { // Интервал увеличен до 20 секунд
+async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
+  logger.info('Starting MySQL connection attempts');
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       await sequelize.authenticate();
@@ -92,6 +103,7 @@ async function connectWithRetry(maxRetries = 5, retryDelay = 20000) { // Инт�
         logger.error('Failed to connect to database after all attempts');
         throw new Error('Database connection failed');
       }
+      logger.info(`Retrying in ${retryDelay / 1000} seconds...`);
       await new Promise(resolve => setTimeout(resolve, retryDelay));
     }
   }
@@ -297,7 +309,6 @@ async function uploadToS3(file, folder) {
 }
 
 // Telegram bot setup
-const TELEGRAM_BOT_TOKEN = '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
 let bot;
 try {
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
@@ -309,7 +320,6 @@ try {
   });
   logger.info('Telegram bot initialized');
 
-  // Handle polling errors
   bot.on('polling_error', (error) => {
     logger.error(`Telegram polling error: ${error.message}`);
     if (error.message.includes('409 Conflict')) {
@@ -432,7 +442,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ message: 'Authorization token required' });
   }
   try {
-    const decoded = jwt.verify(token, 'your_jwt_secret');
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
   } catch (error) {
@@ -444,31 +454,19 @@ const authenticateToken = (req, res, next) => {
 // Database synchronization
 async function syncDatabase() {
   try {
-    await sequelize.sync({ alter: true });
-    logger.info('Database synchronized');
-    const [results] = await sequelize.query("SHOW TABLES LIKE 'Users'");
-    if (results.length > 0) {
-      logger.info('Table Users exists');
-    } else {
-      logger.error('Table Users not created');
-    }
-    const [preRegisterResults] = await sequelize.query("SHOW TABLES LIKE 'PreRegisters'");
-    if (preRegisterResults.length > 0) {
-      logger.info('Table PreRegisters exists');
-    } else {
-      logger.error('Table PreRegisters not created');
-    }
-    const [telegramMappingResults] = await sequelize.query("SHOW TABLES LIKE 'TelegramMappings'");
-    if (telegramMappingResults.length > 0) {
-      logger.info('Table TelegramMappings exists');
-    } else {
-      logger.error('Table TelegramMappings not created');
-    }
-    const [appResults] = await sequelize.query("SHOW TABLES LIKE 'Apps'");
-    if (appResults.length > 0) {
-      logger.info('Table Apps exists');
-    } else {
-      logger.error('Table Apps not created');
+    logger.info('Starting database synchronization');
+    await sequelize.sync({ force: false }); // Safe table creation
+    logger.info('Database synchronized successfully');
+
+    const tablesToCheck = ['Users', 'PreRegisters', 'TelegramMappings', 'Apps'];
+    for (const table of tablesToCheck) {
+      const [results] = await sequelize.query(`SHOW TABLES LIKE '${table}'`);
+      if (results.length > 0) {
+        logger.info(`Table ${table} exists`);
+      } else {
+        logger.error(`Table ${table} was not created`);
+        throw new Error(`Failed to create table ${table}`);
+      }
     }
   } catch (error) {
     logger.error(`Error synchronizing database: ${error.message}`);
@@ -478,20 +476,18 @@ async function syncDatabase() {
 
 // Initialize app
 async function initializeApp() {
+  logger.info('Initializing application');
   try {
     await connectWithRetry();
     await syncDatabase();
+    logger.info('Application initialized successfully');
   } catch (error) {
     logger.error(`Critical initialization error: ${error.message}`);
     process.exit(1);
   }
 }
 
-initializeApp();
-
 // Routes
-
-// Pre-registration
 app.post(
   '/api/pre-register',
   [
@@ -512,14 +508,12 @@ app.post(
 
     try {
       const { email, telegramId } = req.body;
-
       const existingPreRegister = await PreRegister.findOne({ where: { email } });
       if (existingPreRegister) {
         return res.status(400).json({ message: 'This email is already in the waitlist' });
       }
 
       const preRegister = await PreRegister.create({ email, telegramId });
-
       let message = `🌟 Thank you for your interest in PlayEvit!\nYour email (${email}) has been added to the waitlist.\nWe'll notify you about the launch in 2025!`;
       if (telegramId) {
         try {
@@ -538,7 +532,6 @@ app.post(
   }
 );
 
-// User registration
 app.post(
   '/api/auth/register',
   upload,
@@ -584,17 +577,8 @@ app.post(
 
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
-      const verificationToken = jwt.sign(
-        { email },
-        'your_jwt_secret',
-        { expiresIn: '100y' }
-      );
-
-      const authToken = jwt.sign(
-        { email, accountType, name, telegramId },
-        'your_jwt_secret',
-        { expiresIn: '7d' }
-      );
+      const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '100y' });
+      const authToken = jwt.sign({ email, accountType, name, telegramId }, JWT_SECRET, { expiresIn: '7d' });
 
       const user = await User.create({
         email,
@@ -618,26 +602,14 @@ app.post(
         res.status(201).json({
           message: `Registration successful! Check your Telegram (${telegramId}) for verification.`,
           token: authToken,
-          user: {
-            id: user.id,
-            email: user.email,
-            accountType: user.accountType,
-            name: user.name,
-            telegramId: user.telegramId,
-          },
+          user: { id: user.id, email, accountType, name, telegramId },
         });
       } catch (telegramError) {
         logger.warn(`Telegram message not sent for ${email}: ${telegramError.message}`);
         res.status(201).json({
           message: `Registration successful, but Telegram message failed. Send /start to the bot with your ${telegramId}.`,
           token: authToken,
-          user: {
-            id: user.id,
-            email: user.email,
-            accountType: user.accountType,
-            name: user.name,
-            telegramId: user.telegramId,
-          },
+          user: { id: user.id, email, accountType, name, telegramId },
         });
       }
     } catch (error) {
@@ -647,13 +619,12 @@ app.post(
   }
 );
 
-// Email verification via link
 app.get('/api/auth/verify/:token', async (req, res) => {
   try {
     const { token } = req.params;
     let decoded;
     try {
-      decoded = jwt.verify(token, 'your_jwt_secret');
+      decoded = jwt.verify(token, JWT_SECRET);
     } catch (error) {
       logger.warn(`Invalid verification token: ${error.message}`);
       return res.status(400).json({ message: 'Invalid or expired token' });
@@ -692,7 +663,6 @@ app.get('/api/auth/verify/:token', async (req, res) => {
   }
 });
 
-// Email verification via form
 app.post(
   '/api/auth/verify-form',
   [
@@ -708,10 +678,9 @@ app.post(
 
     try {
       const { email, token } = req.body;
-
       let decoded;
       try {
-        decoded = jwt.verify(token, 'your_jwt_secret');
+        decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
         logger.warn(`Invalid verification token in form: ${error.message}`);
         return res.status(400).json({ message: 'Invalid or expired token' });
@@ -756,7 +725,6 @@ app.post(
   }
 );
 
-// User login
 app.post(
   '/api/auth/login',
   [
@@ -772,7 +740,6 @@ app.post(
 
     try {
       const { email, password } = req.body;
-
       const user = await User.findOne({ where: { email } });
       if (!user) {
         logger.warn(`Login attempt with non-existent email: ${email}`);
@@ -787,11 +754,7 @@ app.post(
 
       let token = user.jwtToken;
       if (!token) {
-        token = jwt.sign(
-          { id: user.id, email: user.email },
-          'your_jwt_secret',
-          { expiresIn: '7d' }
-        );
+        token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
         user.jwtToken = token;
         await user.save();
       }
@@ -821,7 +784,6 @@ app.post(
   }
 );
 
-// Password reset request
 app.post(
   '/api/auth/forgot-password',
   [body('email').isEmail().normalizeEmail().withMessage('Valid email is required')],
@@ -840,11 +802,7 @@ app.post(
         return res.status(404).json({ message: 'User with this email not found' });
       }
 
-      const resetToken = jwt.sign(
-        { email },
-        'your_jwt_secret',
-        { expiresIn: '1h' }
-      );
+      const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
       user.resetPasswordToken = resetToken;
       user.resetPasswordExpires = new Date(Date.now() + 3600000);
       await user.save();
@@ -867,7 +825,6 @@ app.post(
   }
 );
 
-// Password reset
 app.post(
   '/api/auth/reset-password/:token',
   [
@@ -884,10 +841,9 @@ app.post(
     try {
       const { token } = req.params;
       const { password } = req.body;
-
       let decoded;
       try {
-        decoded = jwt.verify(token, 'your_jwt_secret');
+        decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
         logger.warn(`Invalid reset token: ${error.message}`);
         return res.status(400).json({ message: 'Invalid or expired token' });
@@ -927,7 +883,6 @@ app.post(
   }
 );
 
-// Get user profile
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
@@ -944,7 +899,6 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Update documents
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -985,7 +939,6 @@ app.post(
   }
 );
 
-// Create new app
 app.post(
   '/api/apps/create',
   authenticateToken,
@@ -993,7 +946,7 @@ app.post(
   [
     body('name').notEmpty().trim().withMessage('App name is required'),
     body('description').notEmpty().trim().withMessage('Description is required'),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category; must be one of: games, productivity, education, entertainment'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -1071,8 +1024,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Server error', error: err.message });
 });
 
-// Start server
-const PORT = 5000;
-app.listen(PORT, () => {
-  logger.info(`Server running on port ${PORT}`);
-});
+// Start server after initialization
+const PORT = process.env.PORT || 5000;
+async function startServer() {
+  await initializeApp();
+  app.listen(PORT, () => {
+    logger.info(`Server running on port ${PORT}`);
+  });
+}
+
+startServer();
