@@ -52,11 +52,7 @@ const logger = winston.createLogger({
   ],
 });
 
-// Firebase Admin SDK Initialization
-const serviceAccount = require('./path-to-your-firebase-adminsdk.json'); // Replace with your Firebase service account key
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+
 
 // S3 Client
 const s3Client = new S3Client({
