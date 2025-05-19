@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql');
+const mysql = require("mysql2/promise");
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
@@ -14,7 +14,7 @@ const app = express();
 
 // Конфигурация переменных окружения
 const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
-const DB_HOST = 'vh438.timeweb.ru';
+const DB_HOST = '24webstudio.ru';
 const DB_USER = 'ch79145_project';
 const DB_PASSWORD = 'Vasya11091109';
 const DB_NAME = 'ch79145_project';
@@ -87,28 +87,35 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Пул подключений к MySQL
-const pool = mysql.createPool({
-  host: DB_HOST,
-  user: DB_USER,
-  password: DB_PASSWORD,
-  database: DB_NAME,
-  port: 3306,
-  connectionLimit: 10,
-  connectTimeout: 30000,
-  acquireTimeout: 30000,
-  waitForConnections: true,
-  queueLimit: 0,
-});
+// Подключение к MySQL (одиночное соединение)
+let connection;
 
-// Промисификация пула для удобства
-const query = (sql, params) => {
-  return new Promise((resolve, reject) => {
-    pool.query(sql, params, (error, results) => {
-      if (error) return reject(error);
-      resolve(results);
+async function initializeConnection() {
+  try {
+    connection = await mysql.createConnection({
+      host: DB_HOST,
+      user: DB_USER,
+      password: DB_PASSWORD,
+      database: DB_NAME,
+      port: 3306,
+      connectTimeout: 30000,
     });
-  });
+    logger.info('Подключение к базе данных успешно');
+  } catch (error) {
+    logger.error(`Ошибка подключения к базе данных: ${error.message}, stack: ${error.stack}`);
+    throw error;
+  }
+}
+
+// Функция выполнения запросов
+const query = async (sql, params) => {
+  try {
+    const [results] = await connection.execute(sql, params);
+    return results;
+  } catch (error) {
+    logger.error(`Ошибка выполнения запроса: ${error.message}, stack: ${error.stack}`);
+    throw error;
+  }
 };
 
 // Механизм повторного подключения к базе данных
@@ -116,6 +123,7 @@ async function connectWithRetry(maxRetries = 5, retryDelay = 60000) {
   logger.info('Начало попыток подключения к MySQL');
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
+      await initializeConnection();
       await query('SELECT 1');
       logger.info('Подключение к базе данных успешно');
       return;
@@ -636,11 +644,11 @@ app.use((err, req, res, next) => {
 // Graceful shutdown
 async function shutdown() {
   logger.info('Выполняется graceful shutdown...');
-  pool.end((err) => {
-    if (err) logger.error(`Ошибка закрытия пула: ${err.message}`);
+  if (connection) {
+    await connection.end();
     logger.info('Соединение с базой данных закрыто');
-    process.exit(0);
-  });
+  }
+  process.exit(0);
 }
 
 process.on('SIGINT', shutdown);
