@@ -62,6 +62,11 @@ const sequelize = new Sequelize({
   logging: (msg) => logger.debug(msg),
 });
 
+// Проверка подключения к базе данных
+sequelize.authenticate()
+  .then(() => logger.info('Подключение к базе данных успешно'))
+  .catch((error) => logger.error(`Ошибка подключения к базе данных: ${error.message}`));
+
 // Модель пользователя
 const User = sequelize.define('User', {
   email: {
@@ -414,11 +419,9 @@ const authenticateToken = (req, res, next) => {
 };
 
 // Синхронизация базы данных
-sequelize.sync({ alter: true }).then(() => {
-  logger.info('База данных успешно синхронизирована');
-}).catch((error) => {
-  logger.error(`Ошибка синхронизации базы данных: ${error.message}`);
-});
+sequelize.sync({ alter: true })
+  .then(() => logger.info('База данных успешно синхронизирована'))
+  .catch((error) => logger.error(`Ошибка синхронизации базы данных: ${error.message}`));
 
 // Маршруты API
 
@@ -654,9 +657,7 @@ app.post(
       await user.save();
 
       if (user.telegramId) {
-        await sendTelegramMessage(user.telegramId, `✅ Ваш email (${user.email}) верифицирован! Добро пожаловать в
-
-System: PlayEvit!`);
+        await sendTelegramMessage(user.telegramId, `✅ Ваш email (${user.email}) верифицирован! Добро пожаловать в PlayEvit!`);
       }
 
       logger.info(`Email верифицирован через форму для ${user.email}`);
@@ -684,37 +685,58 @@ app.post(
 
     try {
       const { email, password } = req.body;
+      logger.info(`Попытка входа для email: ${email}`);
+
+      // Поиск пользователя
       const user = await User.findOne({ where: { email } });
       if (!user) {
-        logger.warn(`Попытка входа с несуществующим email: ${email}`);
+        logger.warn(`Пользователь с email ${email} не найден`);
         return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
+      // Проверка пароля
+      if (!user.password) {
+        logger.error(`Пароль отсутствует для пользователя ${email}`);
+        return res.status(500).json({ message: 'Ошибка сервера: пользовательская запись повреждена' });
+      }
       const isMatch = await bcrypt.compare(password, user.password);
       if (!isMatch) {
         logger.warn(`Неверный пароль для ${email}`);
         return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
+      // Проверка существующего токена
       let token = user.jwtToken;
-      if (!token || !jwt.verify(token, 'my_jwt_secret', { ignoreExpiration: true })) {
+      if (!token || !isValidJwt(token)) {
         token = jwt.sign(
           { id: user.id, email: user.email },
           'my_jwt_secret',
           { expiresIn: '7d' }
         );
         user.jwtToken = token;
-        await user.save();
+        try {
+          await user.save();
+          logger.info(`Новый JWT токен сохранен для ${email}`);
+        } catch (saveError) {
+          logger.error(`Ошибка сохранения токена для ${email}: ${saveError.message}`);
+          return res.status(500).json({ message: 'Ошибка сервера при сохранении токена' });
+        }
       }
 
+      // Отправка сообщения в Telegram
       let message = `🔐 Вы вошли в PlayEvit с email: ${user.email}`;
       if (!user.telegramId) {
-        message = 'Ваш Telegram ID отсутствует. Отправьте /start б  боту и обновите профиль в настройках.';
+        message = 'Ваш Telegram ID отсутствует. Отправьте /start боту и обновите профиль в настройках.';
       } else {
-        await sendTelegramMessage(user.telegramId, message);
+        try {
+          await sendTelegramMessage(user.telegramId, message);
+        } catch (telegramError) {
+          logger.warn(`Ошибка отправки Telegram сообщения для ${email}: ${telegramError.message}`);
+          message += ' (Не удалось отправить уведомление в Telegram)';
+        }
       }
 
-      logger.info(`Пользователь вошел: ${user.email}`);
+      logger.info(`Пользователь успешно вошел: ${email}`);
       res.status(200).json({
         token,
         user: {
@@ -728,11 +750,22 @@ app.post(
         message,
       });
     } catch (error) {
-      logger.error(`Ошибка входа: ${error.message}`);
+      logger.error(`Ошибка входа для ${req.body.email}: ${error.message}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
+
+// Вспомогательная функция для проверки JWT
+function isValidJwt(token) {
+  try {
+    jwt.verify(token, 'my_jwt_secret', { ignoreExpiration: true });
+    return true;
+  } catch (error) {
+    logger.warn(`Недействительный JWT токен: ${error.message}`);
+    return false;
+  }
+}
 
 // Запрос сброса пароля
 app.post(
