@@ -12,7 +12,6 @@ const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
 const AWS = require('aws-sdk');
-require('dotenv').config(); // Для работы с переменными окружения
 
 // Инициализация приложения Express
 const app = express();
@@ -31,32 +30,33 @@ const logger = winston.createLogger({
   ],
 });
 
-// Настройка AWS S3
+// Настройка AWS S3 с жестко заданными значениями
 const s3 = new AWS.S3({
-  endpoint: process.env.S3_ENDPOINT || 'https://s3.twcstorage.ru',
-  accessKeyId: process.env.S3_ACCESS_KEY,
-  secretAccessKey: process.env.S3_SECRET_KEY,
-  region: process.env.S3_REGION || 'ru-1',
+  endpoint: 'https://s3.twcstorage.ru',
+  accessKeyId: 'DN1NLZTORA2L6NZ529JJ',
+  secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
+  region: 'ru-1',
   s3ForcePathStyle: true,
   httpOptions: { timeout: 30000 },
 });
 
-const BUCKET_NAME = process.env.S3_BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 
-// Проверка подключения к S3
+// Проверка подключения к S3 (без завершения процесса)
 s3.listBuckets((err) => {
   if (err) {
     logger.error(`Ошибка подключения к S3: ${err.message}`);
-    process.exit(1);
+  } else {
+    logger.info('Подключение к S3 успешно');
   }
-  logger.info('Подключение к S3 успешно');
 });
 
 // Middleware для безопасности и обработки запросов
 app.use(helmet());
 app.use(cors({ origin: '*' })); // Разрешаем CORS для всех доменов
 app.use(express.json());
-// Подключение к базе данных MySQL
+
+// Подключение к базе данных MySQL (без изменений)
 const sequelize = new Sequelize({
   dialect: 'mysql',
   host: process.env.DB_HOST || 'vh438.timeweb.ru',
@@ -275,7 +275,7 @@ async function uploadToS3(file, folder) {
     logger.info(`Файл загружен в S3: ${key}`);
     return Location;
   } catch (error) {
-    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}`);
+    logger.error(`Ошибка загрузки в S3 для ${key}: ${err.message}`);
     throw new Error(`Ошибка загрузки файла в S3: ${error.message}`);
   }
 }
@@ -359,8 +359,8 @@ async function sendTelegramMessage(telegramId, message) {
   }
 }
 
-// Определяем базовый URL динамически или из переменной окружения
-const BASE_URL = process.env.BASE_URL || 'https://vasyaproger-my-backend-9f42.twc1.net';
+// Определяем базовый URL
+const BASE_URL = 'https://vasyaproger-my-backend-9f42.twc1.net';
 
 // Отправка верификационного сообщения в Telegram
 async function sendVerificationTelegram(telegramId, email, token) {
@@ -1118,7 +1118,7 @@ app.use((err, req, res, next) => {
 });
 
 // Запуск сервера
-const PORT = process.env.PORT || 5000;
+const PORT = 5000;
 app.listen(PORT, () => {
   logger.info(`Сервер запущен на порту ${PORT}`);
 });
