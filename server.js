@@ -79,6 +79,7 @@ app.use(cors({
   origin: CORS_ORIGIN,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['Authorization'],
 }));
 app.use(express.json());
 
@@ -210,15 +211,20 @@ const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
-    logger.warn('Отсутствует токен авторизации');
+    logger.warn(`Отсутствует токен авторизации для маршрута: ${req.originalUrl}`);
     return res.status(401).json({ message: 'Требуется токен авторизации' });
   }
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    if (!decoded.id || !decoded.email) {
+      logger.warn(`Токен не содержит id или email: ${token}`);
+      return res.status(403).json({ message: 'Недействительный токен: отсутствуют необходимые данные' });
+    }
     req.user = decoded;
+    logger.info(`Токен успешно проверен для пользователя: ${decoded.email}, маршрут: ${req.originalUrl}`);
     next();
   } catch (error) {
-    logger.error(`Недействительный токен: ${error.message}, стек: ${error.stack}`);
+    logger.error(`Недействительный токен для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
     return res.status(403).json({ message: 'Недействительный или истекший токен' });
   }
 };
@@ -834,7 +840,7 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
 
 // Обработка ошибок
 app.use((err, req, res, next) => {
-  logger.error(`Необработанная ошибка: ${err.message}, стек: ${err.stack}`);
+  logger.error(`Необработанная ошибка: ${err.message}, стек: ${err.stack}, маршрут: ${req.originalUrl}`);
   if (err instanceof multer.MulterError) {
     logger.warn(`Ошибка Multer: ${err.message}`);
     return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
