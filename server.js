@@ -10,13 +10,23 @@ const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
 const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
-const dotenv = require('dotenv');
-
-dotenv.config();
 
 const app = express();
 
-// Проверка обязательных переменных окружения
+// Конфигурация переменных окружения (без dotenv)
+const JWT_SECRET = 'YOUR_JWT_SECRET'; // Замени на свой секретный ключ для JWT
+const DB_HOST = 'vh438.timeweb.ru'; // Замени на хост MySQL (например, 'localhost' или IP)
+const DB_USER = 'ch79145_project'; // Замени на пользователя MySQL
+const DB_PASSWORD = 'Vasya11091109'; // Замени на пароль MySQL
+const DB_NAME = 'ch79145_project'; // Замени на имя базы данных
+const S3_ACCESS_KEY = 'DN1NLZTORA2L6NZ529JJ'; // Замени на ключ доступа S3
+const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8'; // Замени на секретный ключ S3
+const CORS_ORIGIN = 'https://24webstudio.ru'; // Замени на домен фронтенда
+const PORT = 5000; // Порт по умолчанию
+const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75'; // Замени на имя S3 бакета
+const DB_SSL = 'false'; // Укажи 'true', если требуется SSL для MySQL
+
+// Проверка обязательных переменных
 const requiredEnvVars = [
   'JWT_SECRET',
   'DB_HOST',
@@ -27,23 +37,12 @@ const requiredEnvVars = [
   'S3_SECRET_KEY',
 ];
 for (const envVar of requiredEnvVars) {
-  if (!process.env[envVar]) {
-    console.error(`Ошибка: Переменная окружения ${envVar} не задана`);
+  const value = eval(envVar); // Получаем значение константы
+  if (!value || value === `YOUR_${envVar}`) {
+    console.error(`Ошибка: Переменная ${envVar} не задана или имеет значение по умолчанию`);
     process.exit(1);
   }
 }
-
-// Конфигурация переменных окружения
-const JWT_SECRET = process.env.JWT_SECRET;
-const DB_HOST = process.env.DB_HOST;
-const DB_USER = process.env.DB_USER;
-const DB_PASSWORD = process.env.DB_PASSWORD;
-const DB_NAME = process.env.DB_NAME;
-const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY;
-const S3_SECRET_KEY = process.env.S3_SECRET_KEY;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'https://your-frontend-domain.com';
-const PORT = process.env.PORT || 5000;
-const BUCKET_NAME = process.env.S3_BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 
 // Логирование
 const logger = winston.createLogger({
@@ -108,7 +107,7 @@ const sequelize = new Sequelize({
   },
   dialectOptions: {
     ssl: {
-      require: process.env.DB_SSL === 'true',
+      require: DB_SSL === 'true',
       rejectUnauthorized: false,
     },
     connectTimeout: 30000,
