@@ -56,24 +56,23 @@ app.use(helmet());
 app.use(cors({ origin: '*' })); // Разрешаем CORS для всех доменов
 app.use(express.json());
 
-// Подключение к базе данных MySQL (без изменений)
+// Подключение к базе данных MySQL с жестко заданными значениями
 const sequelize = new Sequelize({
   dialect: 'mysql',
-  host: process.env.DB_HOST || 'vh438.timeweb.ru',
-  username: process.env.DB_USER || 'ch79145_myprojec',
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME || 'ch79145_myprojec',
+  host: 'vh438.timeweb.ru',
+  username: 'ch79145_myprojec',
+  password: 'Vasya11091109',
+  database: 'ch79145_myprojec',
   port: 3306,
   dialectModule: mysql2,
   logging: (msg) => logger.debug(msg),
 });
 
-// Проверка подключения к базе данных
+// Проверка подключения к базе данных (без завершения процесса)
 sequelize.authenticate()
   .then(() => logger.info('Подключение к базе данных успешно'))
   .catch((error) => {
     logger.error(`Ошибка подключения к базе данных: ${error.message}`);
-    process.exit(1);
   });
 
 // Модель пользователя
@@ -275,13 +274,13 @@ async function uploadToS3(file, folder) {
     logger.info(`Файл загружен в S3: ${key}`);
     return Location;
   } catch (error) {
-    logger.error(`Ошибка загрузки в S3 для ${key}: ${err.message}`);
+    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}`);
     throw new Error(`Ошибка загрузки файла в S3: ${error.message}`);
   }
 }
 
-// Настройка Telegram-бота
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// Настройка Telegram-бота с жестко заданным токеном
+const TELEGRAM_BOT_TOKEN = '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
 let bot;
 try {
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
@@ -426,7 +425,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ message: 'Требуется токен авторизации' });
   }
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'my_jwt_secret');
+    const decoded = jwt.verify(token, 'my_jwt_secret');
     req.user = decoded;
     next();
   } catch (error) {
@@ -498,10 +497,11 @@ app.post(
   upload,
   [
     body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
-    body('password').isLength({ min: 8 }).withMessage('Пароль минимум 8 символов'),
-    body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
-    body('name').notEmpty().trim().withMessage('Требуется имя'),
-    body('phone').notEmpty().trim().withMessage('Требуется телефон'),
+body('password').isLength({ min: 8 }).withMessage('Пароль минимум 8 символов'),
+body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
+body('name').notEmpty().trim().withMessage('Требуется имя'),
+body('phone').notEmpty().trim().withMessage('Требуется телефон'),
+
     body('telegramId').optional().trim().custom((value) => {
       if (!value || /^\d+$/.test(value) || /^@/.test(value)) {
         return true;
@@ -540,13 +540,13 @@ app.post(
       const hashedPassword = await bcrypt.hash(password, salt);
       const verificationToken = jwt.sign(
         { email },
-        process.env.JWT_SECRET || 'my_jwt_secret',
+        'my_jwt_secret',
         { expiresIn: '100y' }
       );
 
       const authToken = jwt.sign(
         { email, accountType, name, telegramId },
-        process.env.JWT_SECRET || 'my_jwt_secret',
+        'my_jwt_secret',
         { expiresIn: '7d' }
       );
 
@@ -597,7 +597,7 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     const { token } = req.params;
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET || 'my_jwt_secret');
+      decoded = jwt.verify(token, 'my_jwt_secret');
     } catch (error) {
       logger.warn(`Недействительный токен верификации: ${error.message}`);
       return res.status(400).json({ message: 'Недействительный или истекший токен' });
@@ -652,7 +652,7 @@ app.post(
       const { email, token } = req.body;
       let decoded;
       try {
-        decoded = jwt.verify(token, process.env.JWT_SECRET || 'my_jwt_secret');
+        decoded = jwt.verify(token, 'my_jwt_secret');
       } catch (error) {
         logger.warn(`Недействительный токен в форме: ${error.message}`);
         return res.status(400).json({ message: 'Недействительный или истекший токен' });
@@ -733,7 +733,7 @@ app.post(
       if (!token || !isValidJwt(token)) {
         token = jwt.sign(
           { id: user.id, email: user.email },
-          process.env.JWT_SECRET || 'my_jwt_secret',
+          'my_jwt_secret',
           { expiresIn: '7d' }
         );
         user.jwtToken = token;
@@ -781,7 +781,7 @@ app.post(
 // Вспомогательная функция для проверки JWT
 function isValidJwt(token) {
   try {
-    jwt.verify(token, process.env.JWT_SECRET || 'my_jwt_secret', { ignoreExpiration: true });
+    jwt.verify(token, 'my_jwt_secret', { ignoreExpiration: true });
     return true;
   } catch (error) {
     logger.warn(`Недействительный JWT токен: ${error.message}`);
@@ -810,7 +810,7 @@ app.post(
 
       const resetToken = jwt.sign(
         { email },
-        process.env.JWT_SECRET || 'my_jwt_secret',
+        'my_jwt_secret',
         { expiresIn: '1h' }
       );
       user.resetPasswordToken = resetToken;
@@ -854,7 +854,7 @@ app.post(
       const { password } = req.body;
       let decoded;
       try {
-        decoded = jwt.verify(token, process.env.JWT_SECRET || 'my_jwt_secret');
+        decoded = jwt.verify(token, 'my_jwt_secret');
       } catch (error) {
         logger.warn(`Недействительный токен сброса: ${error.message}`);
         return res.status(400).json({ message: 'Недействительный или истекший токен' });
