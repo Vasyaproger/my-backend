@@ -76,7 +76,7 @@ async function checkS3Connection() {
     await s3Client.send(new ListBucketsCommand({}));
     logger.info('Подключение к S3 успешно');
   } catch (err) {
-    logger.error(`Ошибка подключения к S3: ${err.message}`);
+    logger.error(`Ошибка подключения к S3: ${err.message}, stack: ${err.stack}`);
     throw err;
   }
 }
@@ -124,7 +124,7 @@ async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
       logger.info('Подключение к базе данных успешно');
       return;
     } catch (error) {
-      logger.error(`Попытка ${attempt} не удалась: ${error.message}`);
+      logger.error(`Попытка ${attempt} не удалась: ${error.message}, stack: ${error.stack}`);
       if (error.message.includes('Host') && error.message.includes('blocked')) {
         logger.error('Хост заблокирован MySQL. Выполните "mysqladmin flush-hosts" на сервере.');
       }
@@ -178,6 +178,8 @@ const User = sequelize.define('User', {
     type: DataTypes.BOOLEAN,
     defaultValue: true, // Автоматическая верификация
   },
+  resetPasswordToken: { type: DataTypes.STRING },
+  resetPasswordExpires: { type: DataTypes.DATE },
   jwtToken: {
     type: DataTypes.STRING,
     allowNull: true,
@@ -309,7 +311,7 @@ async function uploadToS3(file, folder) {
     logger.info(`Файл загружен в S3: ${key}`);
     return location;
   } catch (error) {
-    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}`);
+    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}, stack: ${error.stack}`);
     throw new Error(`Ошибка загрузки в S3: ${error.message}`);
   }
 }
@@ -327,7 +329,7 @@ const authenticateToken = (req, res, next) => {
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error(`Недействительный токен: ${error.message}`);
+    logger.error(`Недействительный токен: ${error.message}, stack: ${error.stack}`);
     return res.status(403).json({ message: 'Недействительный или истёкший токен' });
   }
 };
@@ -350,7 +352,7 @@ async function syncDatabase() {
       }
     }
   } catch (error) {
-    logger.error(`Ошибка синхронизации базы данных: ${error.message}`);
+    logger.error(`Ошибка синхронизации базы данных: ${error.message}, stack: ${error.stack}`);
     throw error;
   }
 }
@@ -359,12 +361,14 @@ async function syncDatabase() {
 async function initializeApp() {
   logger.info('Инициализация приложения');
   try {
+    logger.info('Проверка переменных окружения');
+    logger.info(`DB_HOST: ${DB_HOST}, DB_NAME: ${DB_NAME}, S3_BUCKET: ${BUCKET_NAME}`);
     await connectWithRetry();
     await syncDatabase();
     await checkS3Connection();
     logger.info('Приложение успешно инициализировано');
   } catch (error) {
-    logger.error(`Критическая ошибка инициализации: ${error.message}`);
+    logger.error(`Критическая ошибка инициализации: ${error.message}, stack: ${error.stack}`);
     process.exit(1);
   }
 }
@@ -395,7 +399,7 @@ app.post(
       logger.info(`Предварительная регистрация: ${email}`);
       res.status(201).json({ message: `Спасибо за интерес! Ваш email (${email}) добавлен в список ожидания.` });
     } catch (error) {
-      logger.error(`Ошибка предварительной регистрации: ${error.message}`);
+      logger.error(`Ошибка предварительной регистрации: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -465,7 +469,7 @@ app.post(
         user: { id: user.id, email, accountType, name, phone },
       });
     } catch (error) {
-      logger.error(`Ошибка регистрации: ${error.message}`);
+      logger.error(`Ошибка регистрации: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -519,7 +523,7 @@ app.post(
         message: 'Вход успешен',
       });
     } catch (error) {
-      logger.error(`Ошибка входа: ${error.message}`);
+      logger.error(`Ошибка входа: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -552,7 +556,7 @@ app.post(
       logger.info(`Запрос сброса пароля для ${user.email}`);
       res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку по email)' });
     } catch (error) {
-      logger.error(`Ошибка запроса сброса пароля: ${error.message}`);
+      logger.error(`Ошибка запроса сброса пароля: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -579,7 +583,7 @@ app.post(
       try {
         decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
-        logger.warn(`Недействительный токен сброса: ${error.message}`);
+        logger.warn(`Недействительный токен сброса: ${error.message}, stack: ${error.stack}`);
         return res.status(400).json({ message: 'Недействительный или истёкший токен' });
       }
 
@@ -605,7 +609,7 @@ app.post(
       logger.info(`Пароль сброшен для ${user.email}`);
       res.status(200).json({ message: 'Пароль успешно сброшен' });
     } catch (error) {
-      logger.error(`Ошибка сброса пароля: ${error.message}`);
+      logger.error(`Ошибка сброса пароля: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -623,7 +627,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
     }
     res.status(200).json(user);
   } catch (error) {
-    logger.error(`Ошибка получения профиля: ${error.message}`);
+    logger.error(`Ошибка получения профиля: ${error.message}, stack: ${error.stack}`);
     res.status(500).json({ message: 'Ошибка сервера', error: error.message });
   }
 });
@@ -657,7 +661,7 @@ app.post(
       logger.info(`Документы обновлены для пользователя ${user.email}`);
       res.status(200).json({ message: 'Документы успешно обновлены', documents: user.documents });
     } catch (error) {
-      logger.error(`Ошибка обновления документов: ${error.message}`);
+      logger.error(`Ошибка обновления документов: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -720,7 +724,7 @@ app.post(
       logger.info(`Приложение создано пользователем ${user.email}: ${name}`);
       res.status(201).json({ message: 'Приложение успешно отправлено', app });
     } catch (error) {
-      logger.error(`Ошибка создания приложения: ${error.message}`);
+      logger.error(`Ошибка создания приложения: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -728,7 +732,7 @@ app.post(
 
 // Обработка ошибок
 app.use((err, req, res, next) => {
-  logger.error(`Необработанная ошибка: ${err.message}`);
+  logger.error(`Необработанная ошибка: ${err.message}, stack: ${err.stack}`);
   if (err instanceof multer.MulterError) {
     logger.warn(`Ошибка Multer: ${err.message}`);
     return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
@@ -753,10 +757,15 @@ process.on('SIGTERM', shutdown);
 
 // Запуск сервера
 async function startServer() {
-  await initializeApp();
-  app.listen(PORT, () => {
-    logger.info(`Сервер запущен на порту ${PORT}`);
-  });
+  try {
+    await initializeApp();
+    app.listen(PORT, () => {
+      logger.info(`Сервер запущен на порту ${PORT}`);
+    });
+  } catch (error) {
+    logger.error(`Ошибка запуска сервера: ${error.message}, stack: ${error.stack}`);
+    process.exit(1);
+  }
 }
 
 startServer();
