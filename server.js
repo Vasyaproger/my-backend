@@ -14,7 +14,7 @@ const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/cli
 const app = express();
 
 // Конфигурация переменных окружения (без dotenv)
-const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3'; // Сгенерированный безопасный ключ
+const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3'; // Сгенерированный безопасный ключ221
 const DB_HOST = 'vh438.timeweb.ru';
 const DB_USER = 'ch79145_project';
 const DB_PASSWORD = 'Vasya11091109';
