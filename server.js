@@ -1,6 +1,6 @@
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
-const mysql2 = require('mysql2'); // Use mysql2 instead of mysql
+const mysql2 = require('mysql2');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const TelegramBot = require('node-telegram-bot-api');
@@ -10,21 +10,46 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
-const AWS = require('aws-sdk');
+const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
+const fs = require('fs').promises;
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const app = express();
 
-// Environment variables for sensitive data
-const JWT_SECRET = process.env.JWT_SECRET || 'your_secure_random_string_32_chars';
-const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
-const DB_USER = process.env.DB_USER || 'ch79145_project';
-const DB_PASSWORD = process.env.DB_PASSWORD || 'Vasya11091109';
-const DB_NAME = process.env.DB_NAME || 'ch79145_project';
-const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'DN1NLZTORA2L6NZ529JJ';
-const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
+// Проверка обязательных переменных окружения
+const requiredEnvVars = [
+  'JWT_SECRET',
+  'DB_HOST',
+  'DB_USER',
+  'DB_PASSWORD',
+  'DB_NAME',
+  'S3_ACCESS_KEY',
+  'S3_SECRET_KEY',
+  'TELEGRAM_BOT_TOKEN',
+];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`Ошибка: Переменная окружения ${envVar} не задана`);
+    process.exit(1);
+  }
+}
 
-// Logging setup
+// Конфигурация переменных окружения
+const JWT_SECRET = process.env.JWT_SECRET;
+const DB_HOST = process.env.DB_HOST;
+const DB_USER = process.env.DB_USER;
+const DB_PASSWORD = process.env.DB_PASSWORD;
+const DB_NAME = process.env.DB_NAME;
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY;
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || 'https://your-frontend-domain.com'; // Укажи домен фронтенда
+const PORT = process.env.PORT || 5000;
+const BUCKET_NAME = process.env.S3_BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+// Логирование
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -38,37 +63,38 @@ const logger = winston.createLogger({
   ],
 });
 
-// AWS S3 setup
-const s3 = new AWS.S3({
+// AWS S3 (v3)
+const s3Client = new S3Client({
   endpoint: 'https://s3.twcstorage.ru',
-  accessKeyId: S3_ACCESS_KEY,
-  secretAccessKey: S3_SECRET_KEY,
+  credentials: {
+    accessKeyId: S3_ACCESS_KEY,
+    secretAccessKey: S3_SECRET_KEY,
+  },
   region: 'ru-1',
-  s3ForcePathStyle: true,
-  httpOptions: { timeout: 30000 },
+  forcePathStyle: true,
 });
 
-const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
-
-// Check S3 connection
-s3.listBuckets((err) => {
-  if (err) {
-    logger.error(`Ошибка подключения к S3: ${err.message}`);
-  } else {
+// Проверка подключения к S3
+async function checkS3Connection() {
+  try {
+    await s3Client.send(new ListBucketsCommand({}));
     logger.info('Подключение к S3 успешно');
+  } catch (err) {
+    logger.error(`Ошибка подключения к S3: ${err.message}`);
+    throw err;
   }
-});
+}
 
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*', // Restrict in production
+  origin: CORS_ORIGIN,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
 
-// Database connection
+// Подключение к базе данных
 const sequelize = new Sequelize({
   dialect: 'mysql',
   host: DB_HOST,
@@ -79,21 +105,21 @@ const sequelize = new Sequelize({
   dialectModule: mysql2,
   logging: (msg) => logger.debug(msg),
   pool: {
-    max: 2,
+    max: 10, // Увеличено для кластерного режима
     min: 0,
     acquire: 30000,
     idle: 10000,
   },
   dialectOptions: {
     ssl: {
-      require: false, // Enable SSL in production
+      require: process.env.DB_SSL === 'true',
       rejectUnauthorized: false,
     },
     connectTimeout: 30000,
   },
 });
 
-// Database connection retry mechanism
+// Механизм повторного подключения к базе данных
 async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
   logger.info('Начало попыток подключения к MySQL');
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -107,7 +133,7 @@ async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
         logger.error('Хост заблокирован MySQL. Выполните "mysqladmin flush-hosts" на сервере.');
       }
       if (error.message.includes('caching_sha2_password')) {
-        logger.error('Ошибка аутентификации. Убедитесь, что пользователь использует caching_sha2_password или mysql_native_password.');
+        logger.error('Ошибка аутентификации. Убедитесь, что пользователь использует caching_sha2_password.');
       }
       if (attempt === maxRetries) {
         logger.error('Не удалось подключиться к базе данных после всех попыток');
@@ -119,7 +145,7 @@ async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
   }
 }
 
-// User model
+// Модель User
 const User = sequelize.define('User', {
   email: {
     type: DataTypes.STRING,
@@ -172,7 +198,7 @@ const User = sequelize.define('User', {
   tableName: 'Users',
 });
 
-// PreRegister model
+// Модель PreRegister
 const PreRegister = sequelize.define('PreRegister', {
   email: {
     type: DataTypes.STRING,
@@ -189,7 +215,7 @@ const PreRegister = sequelize.define('PreRegister', {
   tableName: 'PreRegisters',
 });
 
-// TelegramMapping model
+// Модель TelegramMapping
 const TelegramMapping = sequelize.define('TelegramMapping', {
   username: {
     type: DataTypes.STRING,
@@ -205,7 +231,7 @@ const TelegramMapping = sequelize.define('TelegramMapping', {
   tableName: 'TelegramMappings',
 });
 
-// App model
+// Модель App
 const App = sequelize.define('App', {
   name: {
     type: DataTypes.STRING,
@@ -244,7 +270,7 @@ const App = sequelize.define('App', {
   tableName: 'Apps',
 });
 
-// File upload setup
+// Настройка загрузки файлов
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -295,7 +321,7 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// S3 upload function
+// Функция загрузки в S3 (v3)
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
@@ -309,47 +335,81 @@ async function uploadToS3(file, folder) {
   };
 
   try {
-    const { Location } = await s3.upload(params).promise();
+    await s3Client.send(new PutObjectCommand(params));
+    const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
     logger.info(`Файл загружен в S3: ${key}`);
-    return Location;
+    return location;
   } catch (error) {
     logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}`);
     throw new Error(`Ошибка загрузки в S3: ${error.message}`);
   }
 }
 
-// Telegram bot setup
+// Telegram бот
 let bot;
+const LOCK_FILE = 'bot.lock';
+
+async function acquireLock() {
+  try {
+    await fs.writeFile(LOCK_FILE, process.pid.toString());
+    logger.info(`Блокировка получена процессом ${process.pid}`);
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      logger.warn('Блокировка уже занята другим процессом');
+      return false;
+    }
+    logger.error(`Ошибка создания файла блокировки: ${error.message}`);
+    throw error;
+  }
+}
+
+async function releaseLock() {
+  try {
+    await fs.unlink(LOCK_FILE);
+    logger.info('Блокировка снята');
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      logger.error(`Ошибка удаления файла блокировки: ${error.message}`);
+    }
+  }
+}
+
 async function initializeTelegramBot() {
+  // Проверяем блокировку
+  const hasLock = await acquireLock();
+  if (!hasLock) {
+    logger.info('Другой процесс управляет ботом, пропускаем инициализацию');
+    return;
+  }
+
   try {
     bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
       polling: {
         interval: 300,
-        autoStart: false, // Start manually to avoid conflicts
+        autoStart: false,
         params: { timeout: 10 },
       },
     });
 
-    // Check for existing polling instances
+    // Проверяем, нет ли конфликта
     try {
       await bot.getUpdates({ limit: 1, timeout: 0 });
-      logger.info('Telegram-бот инициализирован');
-      bot.startPolling();
+      logger.info('Telegram-бот инициализирован, начинаем опрос');
+      await bot.startPolling();
     } catch (error) {
       if (error.message.includes('409 Conflict')) {
-        logger.error('Обнаружен конфликт: другой экземпляр бота запущен. Попытка остановить существующий экземпляр.');
-        await bot.stopPolling();
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        bot.startPolling();
-      } else {
-        throw error;
+        logger.error('Конфликт: другой экземпляр бота уже запущен. Не начинаем опрос.');
+        await releaseLock();
+        return;
       }
+      throw error;
     }
 
     bot.on('polling_error', (error) => {
       logger.error(`Ошибка опроса Telegram: ${error.message}`);
       if (error.message.includes('409 Conflict')) {
-        logger.error('Обнаружен конфликт: другой экземпляр бота запущен. Остановка опроса.');
+        logger.error('Конфликт: другой экземпляр бота запущен. Останавливаем опрос.');
         bot.stopPolling();
       }
     });
@@ -374,10 +434,11 @@ async function initializeTelegramBot() {
     });
   } catch (error) {
     logger.error(`Ошибка инициализации Telegram-бота: ${error.message}`);
+    await releaseLock();
   }
 }
 
-// Resolve Telegram ID
+// Разрешение Telegram ID
 async function resolveTelegramId(telegramId) {
   if (!telegramId) {
     throw new Error('Требуется Telegram ID');
@@ -397,7 +458,7 @@ async function resolveTelegramId(telegramId) {
   return mapping.chatId;
 }
 
-// Send Telegram message
+// Отправка сообщения в Telegram
 async function sendTelegramMessage(telegramId, message) {
   if (!bot) {
     logger.warn('Telegram-бот не инициализирован, отправка сообщения пропущена');
@@ -412,7 +473,7 @@ async function sendTelegramMessage(telegramId, message) {
   }
 }
 
-// Send verification Telegram message
+// Отправка верификационного сообщения
 async function sendVerificationTelegram(telegramId, email, token) {
   if (!bot) {
     logger.warn('Telegram-бот не инициализирован, отправка верификационного сообщения пропущена');
@@ -436,7 +497,7 @@ ${verificationUrl}
   }
 }
 
-// Send password reset Telegram message
+// Отправка сообщения для сброса пароля
 async function sendPasswordResetTelegram(telegramId, token) {
   if (!bot) {
     logger.warn('Telegram-бот не инициализирован, отправка сообщения о сбросе пароля пропущена');
@@ -459,7 +520,7 @@ ${resetUrl}
   }
 }
 
-// JWT authentication middleware
+// Middleware аутентификации JWT
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -477,7 +538,7 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// Database synchronization
+// Синхронизация базы данных
 async function syncDatabase() {
   try {
     logger.info('Начало синхронизации базы данных');
@@ -500,12 +561,13 @@ async function syncDatabase() {
   }
 }
 
-// Application initialization
+// Инициализация приложения
 async function initializeApp() {
   logger.info('Инициализация приложения');
   try {
     await connectWithRetry();
     await syncDatabase();
+    await checkS3Connection();
     await initializeTelegramBot();
     logger.info('Приложение успешно инициализировано');
   } catch (error) {
@@ -514,9 +576,9 @@ async function initializeApp() {
   }
 }
 
-// Routes
+// Маршруты
 
-// Pre-registration
+// Предварительная регистрация
 app.post(
   '/api/pre-register',
   [
@@ -561,7 +623,7 @@ app.post(
   }
 );
 
-// User registration
+// Регистрация пользователя
 app.post(
   '/api/auth/register',
   upload,
@@ -649,7 +711,7 @@ app.post(
   }
 );
 
-// Email verification via link
+// Верификация email по ссылке
 app.get('/api/auth/verify/:token', async (req, res) => {
   try {
     const { token } = req.params;
@@ -694,7 +756,7 @@ app.get('/api/auth/verify/:token', async (req, res) => {
   }
 });
 
-// Email verification via form
+// Верификация email через форму
 app.post(
   '/api/auth/verify-form',
   [
@@ -757,7 +819,7 @@ app.post(
   }
 );
 
-// User login
+// Вход пользователя
 app.post(
   '/api/auth/login',
   [
@@ -817,7 +879,7 @@ app.post(
   }
 );
 
-// Password reset request
+// Запрос сброса пароля
 app.post(
   '/api/auth/forgot-password',
   [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
@@ -859,7 +921,7 @@ app.post(
   }
 );
 
-// Password reset
+// Сброс пароля
 app.post(
   '/api/auth/reset-password/:token',
   [
@@ -918,7 +980,7 @@ app.post(
   }
 );
 
-// Get user profile
+// Получение профиля пользователя
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
@@ -935,7 +997,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Update documents
+// Обновление документов
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -976,7 +1038,7 @@ app.post(
   }
 );
 
-// Create new app
+// Создание нового приложения
 app.post(
   '/api/apps/create',
   authenticateToken,
@@ -1048,7 +1110,7 @@ app.post(
   }
 );
 
-// Error handling middleware
+// Обработка ошибок
 app.use((err, req, res, next) => {
   logger.error(`Необработанная ошибка: ${err.message}`);
   if (err instanceof multer.MulterError) {
@@ -1063,19 +1125,22 @@ app.use((err, req, res, next) => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-  logger.info('Получен сигнал SIGINT. Выполняется graceful shutdown...');
+async function shutdown() {
+  logger.info('Выполняется graceful shutdown...');
   if (bot) {
     await bot.stopPolling();
     logger.info('Telegram-бот остановлен');
   }
   await sequelize.close();
   logger.info('Соединение с базой данных закрыто');
+  await releaseLock();
   process.exit(0);
-});
+}
 
-// Start server
-const PORT = process.env.PORT || 5000;
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// Запуск сервера
 async function startServer() {
   await initializeApp();
   app.listen(PORT, () => {
