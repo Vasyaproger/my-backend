@@ -10,7 +10,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
-const fs = require('fs').promises;
+const AWS = require('aws-sdk');
 
 const app = express();
 
@@ -28,50 +28,74 @@ const logger = winston.createLogger({
   ],
 });
 
+// AWS S3 setup
+const s3 = new AWS.S3({
+  endpoint: 'https://s3.twcstorage.ru',
+  accessKeyId: 'DN1NLZTORA2L6NZ529JJ',
+  secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
+  region: 'ru-1',
+  s3ForcePathStyle: true,
+  httpOptions: { timeout: 30000 },
+});
+
+const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+// Check S3 connection
+s3.listBuckets((err) => {
+  if (err) {
+    logger.error(`Failed to connect to S3: ${err.message}`);
+  } else {
+    logger.info('S3 connection successful');
+  }
+});
+
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: '*', // Для локальной разработки; замените на конкретный домен в продакшене
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads'), {
-  setHeaders: (res) => {
-    res.set('Access-Control-Allow-Origin', '*');
-  }
-}));
-
-// Ensure upload directories exist
-const ensureDirectories = async () => {
-  const dirs = [
-    path.join(__dirname, 'Uploads/documents'),
-    path.join(__dirname, 'Uploads/icons'),
-    path.join(__dirname, 'Uploads/apks'),
-  ];
-  for (const dir of dirs) {
-    try {
-      await fs.mkdir(dir, { recursive: true });
-      await fs.chmod(dir, 0o755); // Устанавливаем права доступа
-      logger.info(`Created directory: ${dir}`);
-    } catch (error) {
-      logger.error(`Failed to create directory ${dir}: ${error.message}`);
-    }
-  }
-};
-ensureDirectories();
 
 // Database connection
 const sequelize = new Sequelize({
   dialect: 'mysql',
-  host: process.env.DB_HOST || 'vh438.timeweb.ru',
-  username: process.env.DB_USER || 'ch79145_myprojec',
-  password: process.env.DB_PASS || 'Vasya11091109',
-  database: 'ch79145_myprojec',
+  host: 'vh438.timeweb.ru',
+  username: 'ch79145_project',
+  password: 'Vasya11091109',
+  database: 'ch79145_project',
   port: 3306,
   dialectModule: mysql2,
   logging: (msg) => logger.debug(msg),
+  pool: {
+    max: 5,
+    min: 0,
+    acquire: 30000,
+    idle: 10000,
+  },
 });
+
+// Connection retry mechanism
+async function connectWithRetry(maxRetries = 5, retryDelay = 10000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await sequelize.authenticate();
+      logger.info('Database connection successful');
+      return;
+    } catch (error) {
+      logger.error(`Connection attempt ${attempt} failed: ${error.message}`);
+      if (error.message.includes('Host') && error.message.includes('blocked')) {
+        logger.error('Host blocked by MySQL. Run "mysqladmin flush-hosts" on the server.');
+      }
+      if (attempt === maxRetries) {
+        logger.error('Failed to connect to database after all attempts');
+        throw new Error('Database connection failed');
+      }
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+  }
+}
 
 // User model
 const User = sequelize.define('User', {
@@ -199,50 +223,47 @@ const App = sequelize.define('App', {
 });
 
 // File upload setup
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    if (file.fieldname === 'documents') {
-      cb(null, './Uploads/documents/');
-    } else if (file.fieldname === 'icon') {
-      cb(null, './Uploads/icons/');
-    } else if (file.fieldname === 'apk') {
-      cb(null, './Uploads/apks/');
-    } else {
-      cb(new Error('Invalid field name'), null);
-    }
-  },
-  filename: (req, file, cb) => {
-    const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
-    cb(null, `${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`);
-  },
-});
-
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
   fileFilter: (req, file, cb) => {
     if (file.fieldname === 'documents') {
-      const filetypes = /pdf|jpg|jpeg|png/;
-      const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = filetypes.test(file.mimetype);
+      const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+      const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
+      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
         return cb(null, true);
       }
+      logger.warn(`Invalid document: name=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Only PDF, JPG, JPEG, and PNG files allowed for documents!'));
     } else if (file.fieldname === 'icon') {
-      const filetypes = /jpg|jpeg|png/;
-      const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = filetypes.test(file.mimetype);
+      const validMimeTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+      const validExtensions = /\.(jpg|jpeg|png)$/i;
+      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
         return cb(null, true);
       }
+      logger.warn(`Invalid icon: name=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Only JPG, JPEG, and PNG files allowed for icons!'));
     } else if (file.fieldname === 'apk') {
-      if (file.originalname.toLowerCase().endsWith('.apk')) {
+      const extname = file.originalname.toLowerCase().endsWith('.apk');
+      const validMimeTypes = [
+        'application/vnd.android.package-archive',
+        'application/octet-stream',
+        'application/x-apk',
+        'application/zip',
+      ];
+      const mimetype = validMimeTypes.includes(file.mimetype);
+      if (extname && mimetype) {
+        logger.info(`APK accepted: name=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
+      logger.warn(`Invalid APK: name=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Only APK files allowed!'));
     } else {
+      logger.warn(`Invalid field name: ${file.fieldname}`);
       cb(new Error('Invalid field name!'));
     }
   },
@@ -252,8 +273,31 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
+// S3 upload function
+async function uploadToS3(file, folder) {
+  const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
+  const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
+
+  const params = {
+    Bucket: BUCKET_NAME,
+    Key: key,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+    ACL: 'public-read',
+  };
+
+  try {
+    const { Location } = await s3.upload(params).promise();
+    logger.info(`File uploaded to S3: ${key}`);
+    return Location;
+  } catch (error) {
+    logger.error(`S3 upload error for ${key}: ${error.message}`);
+    throw new Error(`S3 upload failed: ${error.message}`);
+  }
+}
+
 // Telegram bot setup
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
+const TELEGRAM_BOT_TOKEN = '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
 let bot;
 try {
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
@@ -379,7 +423,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ message: 'Authorization token required' });
   }
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+    const decoded = jwt.verify(token, 'your_jwt_secret');
     req.user = decoded;
     next();
   } catch (error) {
@@ -389,11 +433,52 @@ const authenticateToken = (req, res, next) => {
 };
 
 // Database synchronization
-sequelize.sync({ alter: true }).then(() => {
-  logger.info('Database synchronized');
-}).catch((error) => {
-  logger.error(`Error synchronizing database: ${error.message}`);
-});
+async function syncDatabase() {
+  try {
+    await sequelize.sync({ alter: true });
+    logger.info('Database synchronized');
+    const [results] = await sequelize.query("SHOW TABLES LIKE 'Users'");
+    if (results.length > 0) {
+      logger.info('Table Users exists');
+    } else {
+      logger.error('Table Users not created');
+    }
+    const [preRegisterResults] = await sequelize.query("SHOW TABLES LIKE 'PreRegisters'");
+    if (preRegisterResults.length > 0) {
+      logger.info('Table PreRegisters exists');
+    } else {
+      logger.error('Table PreRegisters not created');
+    }
+    const [telegramMappingResults] = await sequelize.query("SHOW TABLES LIKE 'TelegramMappings'");
+    if (telegramMappingResults.length > 0) {
+      logger.info('Table TelegramMappings exists');
+    } else {
+      logger.error('Table TelegramMappings not created');
+    }
+    const [appResults] = await sequelize.query("SHOW TABLES LIKE 'Apps'");
+    if (appResults.length > 0) {
+      logger.info('Table Apps exists');
+    } else {
+      logger.error('Table Apps not created');
+    }
+  } catch (error) {
+    logger.error(`Error synchronizing database: ${error.message}`);
+    throw error;
+  }
+}
+
+// Initialize app
+async function initializeApp() {
+  try {
+    await connectWithRetry();
+    await syncDatabase();
+  } catch (error) {
+    logger.error(`Critical initialization error: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+initializeApp();
 
 // Routes
 
@@ -484,17 +569,21 @@ app.post(
         return res.status(400).json({ message: 'Email already registered' });
       }
 
+      const documentUrls = await Promise.all(
+        req.files.documents.map(file => uploadToS3(file, 'documents'))
+      );
+
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
       const verificationToken = jwt.sign(
         { email },
-        process.env.JWT_SECRET || 'your_jwt_secret',
+        'your_jwt_secret',
         { expiresIn: '100y' }
       );
 
       const authToken = jwt.sign(
         { email, accountType, name, telegramId },
-        process.env.JWT_SECRET || 'your_jwt_secret',
+        'your_jwt_secret',
         { expiresIn: '7d' }
       );
 
@@ -509,7 +598,7 @@ app.post(
         addressCity,
         addressCountry,
         addressPostalCode,
-        documents: req.files.documents.map(file => file.path),
+        documents: documentUrls,
         verificationToken,
         jwtToken: authToken,
       });
@@ -555,7 +644,7 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     const { token } = req.params;
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+      decoded = jwt.verify(token, 'your_jwt_secret');
     } catch (error) {
       logger.warn(`Invalid verification token: ${error.message}`);
       return res.status(400).json({ message: 'Invalid or expired token' });
@@ -613,7 +702,7 @@ app.post(
 
       let decoded;
       try {
-        decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+        decoded = jwt.verify(token, 'your_jwt_secret');
       } catch (error) {
         logger.warn(`Invalid verification token in form: ${error.message}`);
         return res.status(400).json({ message: 'Invalid or expired token' });
@@ -691,7 +780,7 @@ app.post(
       if (!token) {
         token = jwt.sign(
           { id: user.id, email: user.email },
-          process.env.JWT_SECRET || 'your_jwt_secret',
+          'your_jwt_secret',
           { expiresIn: '7d' }
         );
         user.jwtToken = token;
@@ -744,7 +833,7 @@ app.post(
 
       const resetToken = jwt.sign(
         { email },
-        process.env.JWT_SECRET || 'your_jwt_secret',
+        'your_jwt_secret',
         { expiresIn: '1h' }
       );
       user.resetPasswordToken = resetToken;
@@ -789,7 +878,7 @@ app.post(
 
       let decoded;
       try {
-        decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+        decoded = jwt.verify(token, 'your_jwt_secret');
       } catch (error) {
         logger.warn(`Invalid reset token: ${error.message}`);
         return res.status(400).json({ message: 'Invalid or expired token' });
@@ -864,9 +953,12 @@ app.post(
         return res.status(400).json({ message: 'At least one document is required' });
       }
 
-      const newDocuments = req.files.documents.map(file => file.path);
+      const newDocuments = await Promise.all(
+        req.files.documents.map(file => uploadToS3(file, 'documents'))
+      );
+
       user.documents = [...user.documents, ...newDocuments].slice(0, 3);
-      user.isVerified = true; // Auto-verify after document upload
+      user.isVerified = true;
       await user.save();
 
       try {
@@ -925,12 +1017,15 @@ app.post(
         return res.status(400).json({ message: 'APK file is required' });
       }
 
+      const iconUrl = await uploadToS3(files.icon[0], 'icons');
+      const apkUrl = await uploadToS3(files.apk[0], 'apks');
+
       const app = await App.create({
         name,
         description,
         category,
-        iconPath: files.icon[0].path,
-        apkPath: files.apk[0].path,
+        iconPath: iconUrl,
+        apkPath: apkUrl,
         userId: user.id,
         status: 'pending',
       });
@@ -968,7 +1063,7 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-const PORT = process.env.PORT || 5000;
+const PORT = 5000;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
 });
