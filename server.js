@@ -25,7 +25,7 @@ const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
 const CORS_ORIGIN = 'https://24webstudio.ru';
 const PORT = 5000;
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''; // Опционально: задайте в переменных окружения5
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''; // Опционально: задайте в переменных окружения
 
 // Проверка обязательных переменных
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'];
@@ -206,7 +206,7 @@ async function getFromS3(key) {
 }
 
 // Middleware для аутентификации JWT
-const authenticateToken = (req, personally, next) => {
+const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
@@ -443,18 +443,20 @@ app.post(
       const documentUrls = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
-      const authToken = jwt.sign({ email, accountType, name }, JWT_SECRET, { expiresIn: '7d' });
 
       const [result] = await db.query(
         `INSERT INTO Users (
           email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode,
-          documents, isVerified, jwtToken
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          documents, isVerified
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
-          addressPostalCode || null, JSON.stringify(documentUrls), true, authToken,
+          addressPostalCode || null, JSON.stringify(documentUrls), true,
         ]
       );
+
+      const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
+      await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
       logger.info(`Пользователь зарегистрирован: ${email}`);
       res.status(201).json({
