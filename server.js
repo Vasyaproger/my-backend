@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require("mysql2/promise");
+const mysql = require('mysql2/promise');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
@@ -8,13 +8,16 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
-const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
+const { Upload } = require('@aws-sdk/lib-storage');
+const admin = require('firebase-admin'); // Firebase Admin SDK
+const axios = require('axios');
 
 const app = express();
 
-// Конфигурация переменных окружения
+// Configuration
 const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
-const DB_HOST = '24webstudio.ru';
+const DB_HOST = 'vh438.timeweb.ru'; // Corrected host
 const DB_USER = 'ch79145_project';
 const DB_PASSWORD = 'Vasya11091109';
 const DB_NAME = 'ch79145_project';
@@ -23,26 +26,19 @@ const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
 const CORS_ORIGIN = 'https://24webstudio.ru';
 const PORT = 5000;
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''; // Optional: Set in environment
 
-// Проверка обязательных переменных
-const requiredEnvVars = [
-  'JWT_SECRET',
-  'DB_HOST',
-  'DB_USER',
-  'DB_PASSWORD',
-  'DB_NAME',
-  'S3_ACCESS_KEY',
-  'S3_SECRET_KEY',
-];
+// Validate required variables
+const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'];
 for (const envVar of requiredEnvVars) {
   const value = eval(envVar);
   if (!value || value === `YOUR_${envVar}`) {
-    console.error(`Ошибка: Переменная ${envVar} не задана или имеет значение по умолчанию`);
+    console.error(`Error: ${envVar} is not set or has default value`);
     process.exit(1);
   }
 }
 
-// Логирование
+// Logger
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -56,7 +52,13 @@ const logger = winston.createLogger({
   ],
 });
 
-// AWS S3 (v3)
+// Firebase Admin SDK Initialization
+const serviceAccount = require('./path-to-your-firebase-adminsdk.json'); // Replace with your Firebase service account key
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+// S3 Client
 const s3Client = new S3Client({
   endpoint: 'https://s3.twcstorage.ru',
   credentials: {
@@ -67,13 +69,13 @@ const s3Client = new S3Client({
   forcePathStyle: true,
 });
 
-// Проверка подключения к S3
+// Test S3 Connection
 async function checkS3Connection() {
   try {
     await s3Client.send(new ListBucketsCommand({}));
-    logger.info('Подключение к S3 успешно');
+    logger.info('S3 connection successful');
   } catch (err) {
-    logger.error(`Ошибка подключения к S3: ${err.message}, stack: ${err.stack}`);
+    logger.error(`S3 connection error: ${err.message}, stack: ${err.stack}`);
     throw err;
   }
 }
@@ -87,65 +89,21 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Подключение к MySQL (одиночное соединение)
-let connection;
+// MySQL Connection Pool
+const db = mysql.createPool({
+  host: DB_HOST,
+  user: DB_USER,
+  password: DB_PASSWORD,
+  database: DB_NAME,
+  port: 3306,
+  connectionLimit: 10,
+  connectTimeout: 30000,
+});
 
-async function initializeConnection() {
-  try {
-    connection = await mysql.createConnection({
-      host: DB_HOST,
-      user: DB_USER,
-      password: DB_PASSWORD,
-      database: DB_NAME,
-      port: 3306,
-      connectTimeout: 30000,
-    });
-    logger.info('Подключение к базе данных успешно');
-  } catch (error) {
-    logger.error(`Ошибка подключения к базе данных: ${error.message}, stack: ${error.stack}`);
-    throw error;
-  }
-}
-
-// Функция выполнения запросов
-const query = async (sql, params) => {
-  try {
-    const [results] = await connection.execute(sql, params);
-    return results;
-  } catch (error) {
-    logger.error(`Ошибка выполнения запроса: ${error.message}, stack: ${error.stack}`);
-    throw error;
-  }
-};
-
-// Механизм повторного подключения к базе данных
-async function connectWithRetry(maxRetries = 5, retryDelay = 60000) {
-  logger.info('Начало попыток подключения к MySQL');
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await initializeConnection();
-      await query('SELECT 1');
-      logger.info('Подключение к базе данных успешно');
-      return;
-    } catch (error) {
-      logger.error(`Попытка ${attempt} не удалась: ${error.message}, stack: ${error.stack}`);
-      if (error.message.includes('Host') && error.message.includes('blocked')) {
-        logger.error('Хост заблокирован MySQL. Выполните "mysqladmin flush-hosts" на сервере.');
-      }
-      if (attempt === maxRetries) {
-        logger.error('Не удалось подключиться к базе данных после всех попыток');
-        throw new Error('Не удалось подключиться к базе данных');
-      }
-      logger.info(`Повторная попытка через ${retryDelay / 1000} секунд...`);
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
-    }
-  }
-}
-
-// Настройка загрузки файлов
+// Multer Configuration
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter: (req, file, cb) => {
     if (file.fieldname === 'documents') {
       const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
@@ -155,8 +113,8 @@ const upload = multer({
       if (extname && mimetype) {
         return cb(null, true);
       }
-      logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
+      logger.warn(`Invalid document: name=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed for documents!'));
     } else if (file.fieldname === 'icon') {
       const validMimeTypes = ['image/jpeg', 'image/png', 'image/jpg'];
       const validExtensions = /\.(jpg|jpeg|png)$/i;
@@ -165,8 +123,8 @@ const upload = multer({
       if (extname && mimetype) {
         return cb(null, true);
       }
-      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы JPG, JPEG и PNG для иконок!'));
+      logger.warn(`Invalid icon: name=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Only JPG, JPEG, and PNG files are allowed for icons!'));
     } else if (file.fieldname === 'apk') {
       const extname = file.originalname.toLowerCase().endsWith('.apk');
       const validMimeTypes = [
@@ -177,14 +135,14 @@ const upload = multer({
       ];
       const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
-        logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
+        logger.info(`APK accepted: name=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
-      logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы APK!'));
+      logger.warn(`Invalid APK: name=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Only APK files are allowed!'));
     } else {
-      logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
-      cb(new Error('Недопустимое имя поля!'));
+      logger.warn(`Invalid field name: ${file.fieldname}`);
+      cb(new Error('Invalid field name!'));
     }
   },
 }).fields([
@@ -193,7 +151,7 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// Функция загрузки в S3
+// S3 Upload Function
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
@@ -207,269 +165,411 @@ async function uploadToS3(file, folder) {
   };
 
   try {
-    await s3Client.send(new PutObjectCommand(params));
+    const upload = new Upload({
+      client: s3Client,
+      params,
+    });
+    await upload.done();
     const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
-    logger.info(`Файл загружен в S3: ${key}`);
+    logger.info(`File uploaded to S3: ${key}`);
     return location;
   } catch (error) {
-    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}, stack: ${error.stack}`);
-    throw new Error(`Ошибка загрузки в S3: ${error.message}`);
+    logger.error(`S3 upload error for ${key}: ${error.message}, stack: ${error.stack}`);
+    throw new Error(`S3 upload error: ${error.message}`);
   }
 }
 
-// Middleware аутентификации JWT
+// S3 Delete Function
+async function deleteFromS3(key) {
+  const params = {
+    Bucket: BUCKET_NAME,
+    Key: key,
+  };
+
+  try {
+    await s3Client.send(new DeleteObjectCommand(params));
+    logger.info(`File deleted from S3: ${key}`);
+  } catch (err) {
+    logger.error(`S3 delete error: ${err.message}, stack: ${err.stack}`);
+    throw err;
+  }
+}
+
+// S3 Get Function
+async function getFromS3(key) {
+  const params = {
+    Bucket: BUCKET_NAME,
+    Key: key,
+  };
+
+  try {
+    const command = new GetObjectCommand(params);
+    const data = await s3Client.send(command);
+    return data;
+  } catch (err) {
+    logger.error(`S3 get error: ${err.message}, stack: ${err.stack}`);
+    throw err;
+  }
+}
+
+// JWT Authentication Middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
-    logger.warn('Токен авторизации отсутствует');
-    return res.status(401).json({ message: 'Требуется токен авторизации' });
+    logger.warn('Authorization token missing');
+    return res.status(401).json({ message: 'Authorization token required' });
   }
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error(`Недействительный токен: ${error.message}, stack: ${error.stack}`);
-    return res.status(403).json({ message: 'Недействительный или истёкший токен' });
+    logger.error(`Invalid token: ${error.message}, stack: ${error.stack}`);
+    return res.status(403).json({ message: 'Invalid or expired token' });
   }
 };
 
-// Проверка структуры базы данных
-async function syncDatabase() {
-  try {
-    logger.info('Начало проверки структуры базы данных');
-    const tablesToCheck = ['Users', 'PreRegisters', 'Apps'];
-    for (const table of tablesToCheck) {
-      const results = await query(`SHOW TABLES LIKE ?`, [table]);
-      if (results.length > 0) {
-        logger.info(`Таблица ${table} существует`);
-      } else {
-        logger.error(`Таблица ${table} не найдена`);
-        throw new Error(`Таблица ${table} не существует`);
+// Optional Authentication Middleware
+const optionalAuthenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (token) {
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (!err) {
+        req.user = user;
       }
+      next();
+    });
+  } else {
+    next();
+  }
+};
+
+// Database Schema Initialization
+async function initializeDatabase() {
+  try {
+    const connection = await db.getConnection();
+    logger.info('Connected to MySQL');
+
+    // Create Users table
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS Users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        accountType ENUM('individual', 'commercial') NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        phone VARCHAR(20) NOT NULL,
+        addressStreet VARCHAR(255),
+        addressCity VARCHAR(255),
+        addressCountry VARCHAR(255),
+        addressPostalCode VARCHAR(20),
+        documents JSON,
+        isVerified BOOLEAN DEFAULT FALSE,
+        jwtToken VARCHAR(500),
+        resetPasswordToken VARCHAR(500),
+        resetPasswordExpires DATETIME,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    logger.info('Users table checked/created');
+
+    // Create PreRegisters table
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS PreRegisters (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    logger.info('PreRegisters table checked/created');
+
+    // Create Apps table
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS Apps (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL,
+        category ENUM('games', 'productivity', 'education', 'entertainment') NOT NULL,
+        iconPath VARCHAR(500) NOT NULL,
+        apkPath VARCHAR(500) NOT NULL,
+        userId INT NOT NULL,
+        status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
+      )
+    `);
+    logger.info('Apps table checked/created');
+
+    // Create default admin user
+    const [users] = await connection.query("SELECT * FROM Users WHERE email = ?", ['admin@24webstudio.ru']);
+    if (users.length === 0) {
+      const hashedPassword = await bcrypt.hash('admin123', 10);
+      await connection.query(
+        "INSERT INTO Users (email, password, accountType, name, phone, isVerified) VALUES (?, ?, ?, ?, ?, ?)",
+        ['admin@24webstudio.ru', hashedPassword, 'commercial', 'Admin', '1234567890', true]
+      );
+      logger.info('Admin created: admin@24webstudio.ru / admin123');
+    } else {
+      logger.info('Admin already exists: admin@24webstudio.ru');
     }
-    logger.info('Структура базы данных проверена');
-  } catch (error) {
-    logger.error(`Ошибка проверки базы данных: ${error.message}, stack: ${error.stack}`);
-    throw error;
+
+    connection.release();
+  } catch (err) {
+    logger.error(`Database initialization error: ${err.message}, stack: ${err.stack}`);
+    throw err;
   }
 }
 
-// Инициализация приложения
-async function initializeApp() {
-  logger.info('Инициализация приложения');
+// Initialize Server
+async function initializeServer() {
   try {
-    logger.info(`DB_HOST: ${DB_HOST}, DB_NAME: ${DB_NAME}, S3_BUCKET: ${BUCKET_NAME}`);
-    await connectWithRetry();
-    await syncDatabase();
+    await initializeDatabase();
     await checkS3Connection();
-    logger.info('Приложение успешно инициализировано');
-  } catch (error) {
-    logger.error(`Критическая ошибка инициализации: ${error.message}, stack: ${error.stack}`);
+    app.listen(PORT, () => {
+      logger.info(`Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    logger.error(`Server initialization error: ${err.message}, stack: ${err.stack}`);
     process.exit(1);
   }
 }
 
-// Маршруты
+// Routes
 
-// Предварительная регистрация
+// Public Routes
+app.get('/api/public/apps', async (req, res) => {
+  try {
+    const [apps] = await db.query(`
+      SELECT id, name, description, category, iconPath, status, createdAt
+      FROM Apps
+      WHERE status = 'approved'
+      ORDER BY createdAt DESC
+    `);
+    res.json(apps);
+  } catch (err) {
+    logger.error(`Error fetching apps: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
+app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res) => {
+  const { key } = req.params;
+  try {
+    const image = await getFromS3(`icons/${key}`);
+    res.setHeader('Content-Type', image.ContentType || 'image/jpeg');
+    image.Body.pipe(res);
+  } catch (err) {
+    logger.error(`Error fetching image: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ error: 'Error fetching image: ' + err.message });
+  }
+});
+
+// Pre-registration
 app.post(
   '/api/pre-register',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const { email } = req.body;
-      const [existing] = await query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
+      const [existing] = await db.query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
       if (existing) {
-        return res.status(400).json({ message: 'Этот email уже в списке ожидания' });
+        return res.status(400).json({ message: 'Email already in waitlist' });
       }
 
-      await query('INSERT INTO PreRegisters (email, createdAt, updatedAt) VALUES (?, NOW(), NOW())', [email]);
-      logger.info(`Предварительная регистрация: ${email}`);
-      res.status(201).json({ message: `Спасибо за интерес! Ваш email (${email}) добавлен в список ожидания.` });
+      await db.query('INSERT INTO PreRegisters (email) VALUES (?)', [email]);
+      logger.info(`Pre-registration: ${email}`);
+
+      // Optional: Send Telegram notification
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135', // Replace with your chat ID
+              text: `New pre-registration: ${email}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Telegram notification sent for ${email}`);
+        } catch (telegramErr) {
+          logger.error(`Telegram notification error: ${telegramErr.message}`);
+        }
+      }
+
+      res.status(201).json({ message: `Thank you! Your email (${email}) has been added to the waitlist.` });
     } catch (error) {
-      logger.error(`Ошибка предварительной регистрации: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Pre-registration error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Регистрация пользователя
+// User Registration
 app.post(
   '/api/auth/register',
   upload,
   [
-    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
-    body('password').isLength({ min: 8 }).withMessage('Пароль должен быть минимум 8 символов'),
-    body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
-    body('name').notEmpty().trim().withMessage('Требуется имя'),
-    body('phone').notEmpty().trim().withMessage('Требуется номер телефона'),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('accountType').isIn(['individual', 'commercial']).withMessage('Invalid account type'),
+    body('name').notEmpty().trim().withMessage('Name required'),
+    body('phone').notEmpty().trim().withMessage('Phone number required'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
-      const {
-        email, password, accountType, name, phone,
-        addressStreet, addressCity, addressCountry, addressPostalCode,
-      } = req.body;
-
+      const { email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode } = req.body;
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('Документы не загружены при регистрации');
-        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
+        logger.warn('Documents not uploaded');
+        return res.status(400).json({ message: 'At least one document is required' });
       }
 
-      const [existingUser] = await query('SELECT email FROM Users WHERE email = ?', [email]);
+      const [existingUser] = await db.query('SELECT email FROM Users WHERE email = ?', [email]);
       if (existingUser) {
-        return res.status(400).json({ message: 'Email уже зарегистрирован' });
+        return res.status(400).json({ message: 'Email already registered' });
       }
 
-      const documentUrls = await Promise.all(
-        req.files.documents.map(file => uploadToS3(file, 'documents'))
-      );
-
+      const documentUrls = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
       const authToken = jwt.sign({ email, accountType, name }, JWT_SECRET, { expiresIn: '7d' });
 
-      const [result] = await query(
+      const [result] = await db.query(
         `INSERT INTO Users (
-          email, password, accountType, name, phone,
-          addressStreet, addressCity, addressCountry, addressPostalCode,
-          documents, isVerified, jwtToken, createdAt, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode,
+          documents, isVerified, jwtToken
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          email, hashedPassword, accountType, name, phone,
-          addressStreet || null, addressCity || null, addressCountry || null, addressPostalCode || null,
-          JSON.stringify(documentUrls), true, authToken,
+          email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
+          addressPostalCode || null, JSON.stringify(documentUrls), true, authToken,
         ]
       );
 
-      logger.info(`Пользователь зарегистрирован: ${email}`);
+      logger.info(`User registered: ${email}`);
       res.status(201).json({
-        message: 'Регистрация успешна!',
+        message: 'Registration successful',
         token: authToken,
         user: { id: result.insertId, email, accountType, name, phone },
       });
     } catch (error) {
-      logger.error(`Ошибка регистрации: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Registration error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Вход пользователя
+// User Login
 app.post(
   '/api/auth/login',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
-    body('password').notEmpty().withMessage('Требуется пароль'),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+    body('password').notEmpty().withMessage('Password required'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const { email, password } = req.body;
-      const [user] = await query('SELECT * FROM Users WHERE email = ?', [email]);
+      const [user] = await db.query('SELECT * FROM Users WHERE email = ?', [email]);
       if (!user) {
-        logger.warn(`Попытка входа с несуществующим email: ${email}`);
-        return res.status(400).json({ message: 'Недействительный email или пароль' });
+        logger.warn(`Login attempt with non-existent email: ${email}`);
+        return res.status(400).json({ message: 'Invalid email or password' });
       }
 
       const isMatch = await bcrypt.compare(password, user.password);
       if (!isMatch) {
-        logger.warn(`Неверный пароль для email: ${email}`);
-        return res.status(400).json({ message: 'Недействительный email или пароль' });
+        logger.warn(`Incorrect password for email: ${email}`);
+        return res.status(400).json({ message: 'Invalid email or password' });
       }
 
       let token = user.jwtToken;
       if (!token) {
         token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-        await query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user.id]);
+        await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user.id]);
       }
 
-      logger.info(`Пользователь вошёл: ${user.email}`);
+      logger.info(`User logged in: ${user.email}`);
       res.status(200).json({
         token,
-        user: {
-          id: user.id,
-          email: user.email,
-          accountType: user.accountType,
-          name: user.name,
-          phone: user.phone,
-        },
-        message: 'Вход успешен',
+        user: { id: user.id, email: user.email, accountType: user.accountType, name: user.name, phone: user.phone },
+        message: 'Login successful',
       });
     } catch (error) {
-      logger.error(`Ошибка входа: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Login error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Запрос сброса пароля
+// Forgot Password
 app.post(
   '/api/auth/forgot-password',
-  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
+  [body('email').isEmail().normalizeEmail().withMessage('Valid email required')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const { email } = req.body;
-      const [user] = await query('SELECT id, email FROM Users WHERE email = ?', [email]);
+      const [user] = await db.query('SELECT id, email FROM Users WHERE email = ?', [email]);
       if (!user) {
-        logger.warn(`Попытка сброса пароля для несуществующего email: ${email}`);
-        return res.status(404).json({ message: 'Пользователь с этим email не найден' });
+        logger.warn(`Password reset attempt for non-existent email: ${email}`);
+        return res.status(404).json({ message: 'User with this email not found' });
       }
 
       const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
-      await query(
+      await db.query(
         'UPDATE Users SET resetPasswordToken = ?, resetPasswordExpires = ? WHERE email = ?',
         [resetToken, new Date(Date.now() + 3600000), email]
       );
 
-      logger.info(`Запрос сброса пароля для ${user.email}`);
-      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку по email)' });
+      logger.info(`Password reset requested for ${user.email}`);
+      // Optional: Implement email sending logic here
+      res.status(200).json({ message: 'Password reset link sent (implement email sending)' });
     } catch (error) {
-      logger.error(`Ошибка запроса сброса пароля: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Password reset error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Сброс пароля
+// Reset Password
 app.post(
   '/api/auth/reset-password/:token',
   [
-    body('password').isLength({ min: 8 }).withMessage('Пароль должен быть минимум 8 символов'),
-    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Пароли не совпадают'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Passwords do not match'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
@@ -479,192 +579,290 @@ app.post(
       try {
         decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
-        logger.warn(`Недействительный токен сброса: ${error.message}, stack: ${error.stack}`);
-        return res.status(400).json({ message: 'Недействительный или истёкший токен' });
+        logger.warn(`Invalid reset token: ${error.message}, stack: ${error.stack}`);
+        return res.status(400).json({ message: 'Invalid or expired token' });
       }
 
-      const [user] = await query(
+      const [user] = await db.query(
         'SELECT id, email FROM Users WHERE email = ? AND resetPasswordToken = ? AND resetPasswordExpires > NOW()',
         [decoded.email, token]
       );
       if (!user) {
-        logger.warn(`Недействительный или истёкший токен сброса для email: ${decoded.email}`);
-        return res.status(400).json({ message: 'Недействительный токен или истёк' });
+        logger.warn(`Invalid or expired reset token for email: ${decoded.email}`);
+        return res.status(400).json({ message: 'Invalid or expired token' });
       }
 
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
-      await query(
+      await db.query(
         'UPDATE Users SET password = ?, resetPasswordToken = NULL, resetPasswordExpires = NULL, jwtToken = NULL WHERE email = ?',
         [hashedPassword, decoded.email]
       );
 
-      logger.info(`Пароль сброшен для ${user.email}`);
-      res.status(200).json({ message: 'Пароль успешно сброшен' });
+      logger.info(`Password reset for ${user.email}`);
+      res.status(200).json({ message: 'Password reset successful' });
     } catch (error) {
-      logger.error(`Ошибка сброса пароля: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Password reset error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Получение профиля пользователя
+// User Profile
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
-    const [user] = await query(
-      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt, updatedAt FROM Users WHERE id = ?',
+    const [user] = await db.query(
+      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt FROM Users WHERE id = ?',
       [req.user.id]
     );
     if (!user) {
-      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
-      return res.status(404).json({ message: 'Пользователь не найден' });
+      logger.warn(`User not found for ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'User not found' });
     }
     user.documents = JSON.parse(user.documents || '[]');
     res.status(200).json(user);
   } catch (error) {
-    logger.error(`Ошибка получения профиля: ${error.message}, stack: ${error.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+    logger.error(`Profile fetch error: ${error.message}, stack: ${error.stack}`);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-// Обновление документов
+// Update Documents
 app.post(
   '/api/user/documents',
   authenticateToken,
   upload,
   async (req, res) => {
     try {
-      const [user] = await query('SELECT id, email, documents FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, documents FROM Users WHERE id = ?', [req.user.id]);
       if (!user) {
-        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'Пользователь не найден' });
+        logger.warn(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'User not found' });
       }
 
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('Документы не загружены');
-        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
+        logger.warn('Documents not uploaded');
+        return res.status(400).json({ message: 'At least one document is required' });
       }
 
-      const newDocuments = await Promise.all(
-        req.files.documents.map(file => uploadToS3(file, 'documents'))
-      );
-
+      const newDocuments = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
       const currentDocuments = JSON.parse(user.documents || '[]');
       const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
-      await query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
+      await db.query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
         JSON.stringify(updatedDocuments), true, user.id
       ]);
 
-      logger.info(`Документы обновлены для пользователя ${user.email}`);
-      res.status(200).json({ message: 'Документы успешно обновлены', documents: updatedDocuments });
+      logger.info(`Documents updated for user ${user.email}`);
+      res.status(200).json({ message: 'Documents updated successfully', documents: updatedDocuments });
     } catch (error) {
-      logger.error(`Ошибка обновления документов: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Document update error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Создание нового приложения
+// Create App
 app.post(
   '/api/apps/create',
   authenticateToken,
   upload,
   [
-    body('name').notEmpty().trim().withMessage('Требуется название приложения'),
-    body('description').notEmpty().trim().withMessage('Требуется описание'),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Недопустимая категория'),
+    body('name').notEmpty().trim().withMessage('App name required'),
+    body('description').notEmpty().trim().withMessage('Description required'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
-      const [user] = await query('SELECT id, email, isVerified FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, isVerified FROM Users WHERE id = ?', [req.user.id]);
       if (!user) {
-        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'Пользователь не найден' });
+        logger.warn(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'User not found' });
       }
 
       if (!user.isVerified) {
-        logger.warn(`Пользователь не верифицирован: ${user.email}`);
-        return res.status(403).json({ message: 'Аккаунт должен быть верифицирован для отправки приложений' });
+        logger.warn(`User not verified: ${user.email}`);
+        return res.status(403).json({ message: 'Account must be verified to submit apps' });
       }
 
       const { name, description, category } = req.body;
       const files = req.files;
 
       if (!files || !files.icon || !files.icon[0]) {
-        logger.warn('Файл иконки отсутствует');
-        return res.status(400).json({ message: 'Требуется файл иконки (JPG, JPEG или PNG)' });
+        logger.warn('Icon file missing');
+        return res.status(400).json({ message: 'Icon file required (JPG, JPEG, or PNG)' });
       }
       if (!files.apk || !files.apk[0]) {
-        logger.warn('Файл APK отсутствует');
-        return res.status(400).json({ message: 'Требуется файл APK' });
+        logger.warn('APK file missing');
+        return res.status(400).json({ message: 'APK file required' });
       }
 
       const iconUrl = await uploadToS3(files.icon[0], 'icons');
       const apkUrl = await uploadToS3(files.apk[0], 'apks');
 
-      const [result] = await query(
+      const [result] = await db.query(
         `INSERT INTO Apps (
-          name, description, category, iconPath, apkPath, userId, status, createdAt, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          name, description, category, iconPath, apkPath, userId, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [name, description, category, iconUrl, apkUrl, user.id, 'pending']
       );
 
-      logger.info(`Приложение создано пользователем ${user.email}: ${name}`);
+      logger.info(`App created by user ${user.email}: ${name}`);
+
+      // Optional: Send Telegram notification
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135', // Replace with your chat ID
+              text: `New app submitted: ${name} by ${user.email}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Telegram notification sent for app ${name}`);
+        } catch (telegramErr) {
+          logger.error(`Telegram notification error: ${telegramErr.message}`);
+        }
+      }
+
       res.status(201).json({
-        message: 'Приложение успешно отправлено',
+        message: 'App submitted successfully',
         app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user.id, status: 'pending' },
       });
     } catch (error) {
-      logger.error(`Ошибка создания приложения: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`App creation error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Обработка ошибок
-app.use((err, req, res, next) => {
-  logger.error(`Необработанная ошибка: ${err.message}, stack: ${err.stack}`);
-  if (err instanceof multer.MulterError) {
-    logger.warn(`Ошибка Multer: ${err.message}`);
-    return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
+// Admin Routes (assuming admin is identified by email or accountType)
+app.get('/api/admin/apps', authenticateToken, async (req, res) => {
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user || user.email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const [apps] = await db.query(`
+      SELECT a.*, u.email as userEmail, u.name as userName
+      FROM Apps a
+      JOIN Users u ON a.userId = u.id
+      ORDER BY a.createdAt DESC
+    `);
+    res.json(apps);
+  } catch (err) {
+    logger.error(`Error fetching admin apps: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
-  if (err.message.includes('Разрешены только')) {
-    logger.warn(`Ошибка типа файла: ${err.message}`);
-    return res.status(400).json({ message: err.message });
-  }
-  res.status(500).json({ message: 'Ошибка сервера', error: err.message });
 });
 
-// Graceful shutdown
-async function shutdown() {
-  logger.info('Выполняется graceful shutdown...');
-  if (connection) {
-    await connection.end();
-    logger.info('Соединение с базой данных закрыто');
+app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user || user.email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    if (!['pending', 'approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const [app] = await db.query('SELECT * FROM Apps WHERE id = ?', [id]);
+    if (!app) {
+      return res.status(404).json({ message: 'App not found' });
+    }
+
+    await db.query('UPDATE Apps SET status = ? WHERE id = ?', [status, id]);
+    logger.info(`App ${id} status updated to ${status}`);
+
+    // Optional: Notify user via Firebase or Telegram
+    if (status !== 'pending') {
+      const [appUser] = await db.query('SELECT email FROM Users WHERE id = ?', [app.userId]);
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135', // Replace with your chat ID
+              text: `App ${app.name} status updated to ${status} for user ${appUser.email}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Telegram notification sent for app ${app.name}`);
+        } catch (telegramErr) {
+          logger.error(`Telegram notification error: ${telegramErr.message}`);
+        }
+      }
+    }
+
+    res.json({ message: `App status updated to ${status}` });
+  } catch (err) {
+    logger.error(`Error updating app: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ error: 'Server error: ' + err.message });
   }
+});
+
+app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user || user.email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const [app] = await db.query('SELECT iconPath, apkPath FROM Apps WHERE id = ?', [id]);
+    if (!app) {
+      return res.status(404).json({ message: 'App not found' });
+    }
+
+    if (app.iconPath) await deleteFromS3(app.iconPath.split('/').pop());
+    if (app.apkPath) await deleteFromS3(app.apkPath.split('/').pop());
+
+    await db.query('DELETE FROM Apps WHERE id = ?', [id]);
+    logger.info(`App ${id} deleted`);
+
+    res.json({ message: 'App deleted' });
+  } catch (err) {
+    logger.error(`Error deleting app: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ error: 'Server error: ' + err.message });
+  }
+});
+
+// Error Handling
+app.use((err, req, res, next) => {
+  logger.error(`Unhandled error: ${err.message}, stack: ${err.stack}`);
+  if (err instanceof multer.MulterError) {
+    logger.warn(`Multer error: ${err.message}`);
+    return res.status(400).json({ message: `File upload error: ${err.message}` });
+  }
+  if (err.message.includes('Разрешены только')) {
+    logger.warn(`File type error: ${err.message}`);
+    return res.status(400).json({ message: err.message });
+  }
+  res.status(500).json({ message: 'Server error', error: err.message });
+});
+
+// Graceful Shutdown
+async function shutdown() {
+  logger.info('Performing graceful shutdown...');
+  await db.end();
+  logger.info('Database connection closed');
   process.exit(0);
 }
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Запуск сервера
-async function startServer() {
-  try {
-    await initializeApp();
-    app.listen(PORT, () => {
-      logger.info(`Сервер запущен на порту ${PORT}`);
-    });
-  } catch (error) {
-    logger.error(`Ошибка запуска сервера: ${error.message}, stack: ${error.stack}`);
-    process.exit(1);
-  }
-}
-
-startServer();
+// Start Server
+initializeServer();
