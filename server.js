@@ -54,17 +54,8 @@ s3.listBuckets((err) => {
 
 // Middleware для безопасности и обработки запросов
 app.use(helmet());
-app.use(cors({
-  origin: [
-    'https://24webstudio.ru',
-    'http://localhost:3000',
-    'https://vasyaproger-my-backend-9f42.twc1.net', // Добавлен новый домен
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+app.use(cors({ origin: '*' })); // Разрешаем CORS для всех доменов
 app.use(express.json());
-
 // Подключение к базе данных MySQL
 const sequelize = new Sequelize({
   dialect: 'mysql',
