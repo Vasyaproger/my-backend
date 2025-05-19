@@ -14,7 +14,7 @@ const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/cli
 const app = express();
 
 // Конфигурация переменных окружения (без dotenv)
-const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3'; // Сгенерированный безопасный ключ221
+const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
 const DB_HOST = 'vh438.timeweb.ru';
 const DB_USER = 'ch79145_project';
 const DB_PASSWORD = 'Vasya11091109';
@@ -24,7 +24,6 @@ const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
 const CORS_ORIGIN = 'https://24webstudio.ru';
 const PORT = 5000;
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
-const DB_SSL = 'false';
 
 // Проверка обязательных переменных
 const requiredEnvVars = [
@@ -106,10 +105,6 @@ const sequelize = new Sequelize({
     idle: 10000,
   },
   dialectOptions: {
-    ssl: {
-      require: DB_SSL === 'true',
-      rejectUnauthorized: false,
-    },
     connectTimeout: 30000,
   },
 });
