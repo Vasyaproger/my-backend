@@ -24,8 +24,8 @@ const logger = winston.createLogger({
     winston.format.json()
   ),
   transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'combined.log' }),
+    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/combined.log' }),
     new winston.transports.Console(),
   ],
 });
@@ -37,19 +37,19 @@ const s3 = new AWS.S3({
   secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
   region: 'ru-1',
   s3ForcePathStyle: true,
-  httpOptions: { timeout: 30000 }, // Увеличенный тайм-аут для больших файлов
+  httpOptions: { timeout: 30000 },
 });
 
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 
 // Middleware для безопасности и обработки запросов
-app.use(helmet()); // Защита от уязвимостей
+app.use(helmet());
 app.use(cors({
   origin: ['https://24webstudio.ru', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use(express.json()); // Парсинг JSON-запросов
+app.use(express.json());
 
 // Подключение к базе данных MySQL
 const sequelize = new Sequelize({
@@ -159,7 +159,7 @@ const App = sequelize.define('App', {
   name: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true, // Уникальность имени приложения
+    unique: true,
   },
   description: {
     type: DataTypes.TEXT,
@@ -201,7 +201,7 @@ const App = sequelize.define('App', {
 // Настройка загрузки файлов с помощью Multer
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 }, // Лимит 100 МБ
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.fieldname === 'documents') {
       const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
@@ -225,12 +225,18 @@ const upload = multer({
       cb(new Error('Для иконок разрешены только JPG, JPEG и PNG!'));
     } else if (file.fieldname === 'apk') {
       const extname = file.originalname.toLowerCase().endsWith('.apk');
-      const mimetype = file.mimetype === 'application/vnd.android.package-archive';
+      const validMimeTypes = [
+        'application/vnd.android.package-archive',
+        'application/octet-stream',
+        'application/x-apk',
+      ];
+      const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
+        logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
       logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только APK файлы с правильным MIME-типом!'));
+      cb(new Error('Разрешены только APK файлы с допустимым MIME-типом!'));
     } else {
       logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
       cb(new Error('Недопустимое имя поля!'));
@@ -340,7 +346,7 @@ async function sendTelegramMessage(telegramId, message) {
     await bot.sendMessage(chatId, message);
     logger.info(`Сообщение отправлено на chat ID ${chatId}`);
   } catch (error) {
-    logger.error(`Ошибка ارسال сообщения на Telegram ID ${telegramId}: ${error.message}`);
+    logger.error(`Ошибка отправки сообщения на Telegram ID ${telegramId}: ${error.message}`);
   }
 }
 
@@ -1094,7 +1100,7 @@ app.use((err, req, res, next) => {
 });
 
 // Запуск сервера
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   logger.info(`Сервер запущен на порту ${PORT}`);
 });
