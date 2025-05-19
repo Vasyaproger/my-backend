@@ -1,6 +1,5 @@
 const express = require('express');
-const { Sequelize, DataTypes } = require('sequelize');
-const mysql2 = require('mysql2');
+const mysql = require('mysql');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
@@ -13,7 +12,7 @@ const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/cli
 
 const app = express();
 
-// Конфигурация переменных окружения (без dotenv)
+// Конфигурация переменных окружения
 const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
 const DB_HOST = 'vh438.timeweb.ru';
 const DB_USER = 'ch79145_project';
@@ -88,42 +87,42 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Подключение к базе данных
-const sequelize = new Sequelize({
-  dialect: 'mysql',
+// Пул подключений к MySQL
+const pool = mysql.createPool({
   host: DB_HOST,
-  username: DB_USER,
+  user: DB_USER,
   password: DB_PASSWORD,
   database: DB_NAME,
   port: 3306,
-  dialectModule: mysql2,
-  logging: (msg) => logger.debug(msg),
-  pool: {
-    max: 10,
-    min: 0,
-    acquire: 30000,
-    idle: 10000,
-  },
-  dialectOptions: {
-    connectTimeout: 30000,
-  },
+  connectionLimit: 10,
+  connectTimeout: 30000,
+  acquireTimeout: 30000,
+  waitForConnections: true,
+  queueLimit: 0,
 });
 
+// Промисификация пула для удобства
+const query = (sql, params) => {
+  return new Promise((resolve, reject) => {
+    pool.query(sql, params, (error, results) => {
+      if (error) return reject(error);
+      resolve(results);
+    });
+  });
+};
+
 // Механизм повторного подключения к базе данных
-async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
+async function connectWithRetry(maxRetries = 5, retryDelay = 60000) {
   logger.info('Начало попыток подключения к MySQL');
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      await sequelize.authenticate();
+      await query('SELECT 1');
       logger.info('Подключение к базе данных успешно');
       return;
     } catch (error) {
       logger.error(`Попытка ${attempt} не удалась: ${error.message}, stack: ${error.stack}`);
       if (error.message.includes('Host') && error.message.includes('blocked')) {
         logger.error('Хост заблокирован MySQL. Выполните "mysqladmin flush-hosts" на сервере.');
-      }
-      if (error.message.includes('caching_sha2_password')) {
-        logger.error('Ошибка аутентификации. Убедитесь, что пользователь использует caching_sha2_password.');
       }
       if (attempt === maxRetries) {
         logger.error('Не удалось подключиться к базе данных после всех попыток');
@@ -134,106 +133,6 @@ async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
     }
   }
 }
-
-// Модель User
-const User = sequelize.define('User', {
-  email: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    unique: true,
-    validate: { isEmail: true },
-  },
-  password: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  accountType: {
-    type: DataTypes.ENUM('individual', 'commercial'),
-    allowNull: false,
-  },
-  name: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  phone: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  addressStreet: { type: DataTypes.STRING },
-  addressCity: { type: DataTypes.STRING },
-  addressCountry: { type: DataTypes.STRING },
-  addressPostalCode: { type: DataTypes.STRING },
-  documents: {
-    type: DataTypes.JSON,
-    allowNull: false,
-    defaultValue: [],
-  },
-  isVerified: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: true, // Автоматическая верификация
-  },
-  resetPasswordToken: { type: DataTypes.STRING },
-  resetPasswordExpires: { type: DataTypes.DATE },
-  jwtToken: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
-}, {
-  timestamps: true,
-  tableName: 'Users',
-});
-
-// Модель PreRegister
-const PreRegister = sequelize.define('PreRegister', {
-  email: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    unique: true,
-    validate: { isEmail: true },
-  },
-}, {
-  timestamps: true,
-  tableName: 'PreRegisters',
-});
-
-// Модель App
-const App = sequelize.define('App', {
-  name: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  description: {
-    type: DataTypes.TEXT,
-    allowNull: false,
-  },
-  category: {
-    type: DataTypes.ENUM('games', 'productivity', 'education', 'entertainment'),
-    allowNull: false,
-  },
-  iconPath: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  apkPath: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-  userId: {
-    type: DataTypes.INTEGER,
-    allowNull: false,
-    references: {
-      model: User,
-      key: 'id',
-    },
-  },
-  status: {
-    type: DataTypes.ENUM('pending', 'approved', 'rejected'),
-    defaultValue: 'pending',
-  },
-}, {
-  timestamps: true,
-  tableName: 'Apps',
-});
 
 // Настройка загрузки файлов
 const upload = multer({
@@ -286,7 +185,7 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// Функция загрузки в S3 (v3)
+// Функция загрузки в S3
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
@@ -328,25 +227,23 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// Синхронизация базы данных
+// Проверка структуры базы данных
 async function syncDatabase() {
   try {
-    logger.info('Начало синхронизации базы данных');
-    await sequelize.sync({ force: false });
-    logger.info('База данных успешно синхронизирована');
-
+    logger.info('Начало проверки структуры базы данных');
     const tablesToCheck = ['Users', 'PreRegisters', 'Apps'];
     for (const table of tablesToCheck) {
-      const [results] = await sequelize.query(`SHOW TABLES LIKE '${table}'`);
+      const results = await query(`SHOW TABLES LIKE ?`, [table]);
       if (results.length > 0) {
         logger.info(`Таблица ${table} существует`);
       } else {
-        logger.error(`Таблица ${table} не создана`);
-        throw new Error(`Не удалось создать таблицу ${table}`);
+        logger.error(`Таблица ${table} не найдена`);
+        throw new Error(`Таблица ${table} не существует`);
       }
     }
+    logger.info('Структура базы данных проверена');
   } catch (error) {
-    logger.error(`Ошибка синхронизации базы данных: ${error.message}, stack: ${error.stack}`);
+    logger.error(`Ошибка проверки базы данных: ${error.message}, stack: ${error.stack}`);
     throw error;
   }
 }
@@ -355,7 +252,6 @@ async function syncDatabase() {
 async function initializeApp() {
   logger.info('Инициализация приложения');
   try {
-    logger.info('Проверка переменных окружения');
     logger.info(`DB_HOST: ${DB_HOST}, DB_NAME: ${DB_NAME}, S3_BUCKET: ${BUCKET_NAME}`);
     await connectWithRetry();
     await syncDatabase();
@@ -384,12 +280,12 @@ app.post(
 
     try {
       const { email } = req.body;
-      const existingPreRegister = await PreRegister.findOne({ where: { email } });
-      if (existingPreRegister) {
+      const [existing] = await query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
+      if (existing) {
         return res.status(400).json({ message: 'Этот email уже в списке ожидания' });
       }
 
-      await PreRegister.create({ email });
+      await query('INSERT INTO PreRegisters (email, createdAt, updatedAt) VALUES (?, NOW(), NOW())', [email]);
       logger.info(`Предварительная регистрация: ${email}`);
       res.status(201).json({ message: `Спасибо за интерес! Ваш email (${email}) добавлен в список ожидания.` });
     } catch (error) {
@@ -428,7 +324,7 @@ app.post(
         return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
-      const existingUser = await User.findOne({ where: { email } });
+      const [existingUser] = await query('SELECT email FROM Users WHERE email = ?', [email]);
       if (existingUser) {
         return res.status(400).json({ message: 'Email уже зарегистрирован' });
       }
@@ -441,26 +337,24 @@ app.post(
       const hashedPassword = await bcrypt.hash(password, salt);
       const authToken = jwt.sign({ email, accountType, name }, JWT_SECRET, { expiresIn: '7d' });
 
-      const user = await User.create({
-        email,
-        password: hashedPassword,
-        accountType,
-        name,
-        phone,
-        addressStreet,
-        addressCity,
-        addressCountry,
-        addressPostalCode,
-        documents: documentUrls,
-        isVerified: true,
-        jwtToken: authToken,
-      });
+      const [result] = await query(
+        `INSERT INTO Users (
+          email, password, accountType, name, phone,
+          addressStreet, addressCity, addressCountry, addressPostalCode,
+          documents, isVerified, jwtToken, createdAt, updatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          email, hashedPassword, accountType, name, phone,
+          addressStreet || null, addressCity || null, addressCountry || null, addressPostalCode || null,
+          JSON.stringify(documentUrls), true, authToken,
+        ]
+      );
 
       logger.info(`Пользователь зарегистрирован: ${email}`);
       res.status(201).json({
         message: 'Регистрация успешна!',
         token: authToken,
-        user: { id: user.id, email, accountType, name, phone },
+        user: { id: result.insertId, email, accountType, name, phone },
       });
     } catch (error) {
       logger.error(`Ошибка регистрации: ${error.message}, stack: ${error.stack}`);
@@ -485,7 +379,7 @@ app.post(
 
     try {
       const { email, password } = req.body;
-      const user = await User.findOne({ where: { email } });
+      const [user] = await query('SELECT * FROM Users WHERE email = ?', [email]);
       if (!user) {
         logger.warn(`Попытка входа с несуществующим email: ${email}`);
         return res.status(400).json({ message: 'Недействительный email или пароль' });
@@ -500,8 +394,7 @@ app.post(
       let token = user.jwtToken;
       if (!token) {
         token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-        user.jwtToken = token;
-        await user.save();
+        await query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user.id]);
       }
 
       logger.info(`Пользователь вошёл: ${user.email}`);
@@ -536,16 +429,17 @@ app.post(
 
     try {
       const { email } = req.body;
-      const user = await User.findOne({ where: { email } });
+      const [user] = await query('SELECT id, email FROM Users WHERE email = ?', [email]);
       if (!user) {
         logger.warn(`Попытка сброса пароля для несуществующего email: ${email}`);
         return res.status(404).json({ message: 'Пользователь с этим email не найден' });
       }
 
       const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
-      user.resetPasswordToken = resetToken;
-      user.resetPasswordExpires = new Date(Date.now() + 3600000);
-      await user.save();
+      await query(
+        'UPDATE Users SET resetPasswordToken = ?, resetPasswordExpires = ? WHERE email = ?',
+        [resetToken, new Date(Date.now() + 3600000), email]
+      );
 
       logger.info(`Запрос сброса пароля для ${user.email}`);
       res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку по email)' });
@@ -581,24 +475,21 @@ app.post(
         return res.status(400).json({ message: 'Недействительный или истёкший токен' });
       }
 
-      const user = await User.findOne({
-        where: {
-          email: decoded.email,
-          resetPasswordToken: token,
-          resetPasswordExpires: { [Sequelize.Op.gt]: new Date() },
-        },
-      });
+      const [user] = await query(
+        'SELECT id, email FROM Users WHERE email = ? AND resetPasswordToken = ? AND resetPasswordExpires > NOW()',
+        [decoded.email, token]
+      );
       if (!user) {
         logger.warn(`Недействительный или истёкший токен сброса для email: ${decoded.email}`);
         return res.status(400).json({ message: 'Недействительный токен или истёк' });
       }
 
       const salt = await bcrypt.genSalt(10);
-      user.password = await bcrypt.hash(password, salt);
-      user.resetPasswordToken = null;
-      user.resetPasswordExpires = null;
-      user.jwtToken = null;
-      await user.save();
+      const hashedPassword = await bcrypt.hash(password, salt);
+      await query(
+        'UPDATE Users SET password = ?, resetPasswordToken = NULL, resetPasswordExpires = NULL, jwtToken = NULL WHERE email = ?',
+        [hashedPassword, decoded.email]
+      );
 
       logger.info(`Пароль сброшен для ${user.email}`);
       res.status(200).json({ message: 'Пароль успешно сброшен' });
@@ -612,13 +503,15 @@ app.post(
 // Получение профиля пользователя
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findByPk(req.user.id, {
-      attributes: { exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'jwtToken'] },
-    });
+    const [user] = await query(
+      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt, updatedAt FROM Users WHERE id = ?',
+      [req.user.id]
+    );
     if (!user) {
       logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
       return res.status(404).json({ message: 'Пользователь не найден' });
     }
+    user.documents = JSON.parse(user.documents || '[]');
     res.status(200).json(user);
   } catch (error) {
     logger.error(`Ошибка получения профиля: ${error.message}, stack: ${error.stack}`);
@@ -633,7 +526,7 @@ app.post(
   upload,
   async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id);
+      const [user] = await query('SELECT id, email, documents FROM Users WHERE id = ?', [req.user.id]);
       if (!user) {
         logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
         return res.status(404).json({ message: 'Пользователь не найден' });
@@ -648,12 +541,14 @@ app.post(
         req.files.documents.map(file => uploadToS3(file, 'documents'))
       );
 
-      user.documents = [...user.documents, ...newDocuments].slice(0, 3);
-      user.isVerified = true;
-      await user.save();
+      const currentDocuments = JSON.parse(user.documents || '[]');
+      const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
+      await query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
+        JSON.stringify(updatedDocuments), true, user.id
+      ]);
 
       logger.info(`Документы обновлены для пользователя ${user.email}`);
-      res.status(200).json({ message: 'Документы успешно обновлены', documents: user.documents });
+      res.status(200).json({ message: 'Документы успешно обновлены', documents: updatedDocuments });
     } catch (error) {
       logger.error(`Ошибка обновления документов: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
@@ -679,7 +574,7 @@ app.post(
     }
 
     try {
-      const user = await User.findByPk(req.user.id);
+      const [user] = await query('SELECT id, email, isVerified FROM Users WHERE id = ?', [req.user.id]);
       if (!user) {
         logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
         return res.status(404).json({ message: 'Пользователь не найден' });
@@ -705,18 +600,18 @@ app.post(
       const iconUrl = await uploadToS3(files.icon[0], 'icons');
       const apkUrl = await uploadToS3(files.apk[0], 'apks');
 
-      const app = await App.create({
-        name,
-        description,
-        category,
-        iconPath: iconUrl,
-        apkPath: apkUrl,
-        userId: user.id,
-        status: 'pending',
-      });
+      const [result] = await query(
+        `INSERT INTO Apps (
+          name, description, category, iconPath, apkPath, userId, status, createdAt, updatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [name, description, category, iconUrl, apkUrl, user.id, 'pending']
+      );
 
       logger.info(`Приложение создано пользователем ${user.email}: ${name}`);
-      res.status(201).json({ message: 'Приложение успешно отправлено', app });
+      res.status(201).json({
+        message: 'Приложение успешно отправлено',
+        app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user.id, status: 'pending' },
+      });
     } catch (error) {
       logger.error(`Ошибка создания приложения: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
@@ -741,9 +636,11 @@ app.use((err, req, res, next) => {
 // Graceful shutdown
 async function shutdown() {
   logger.info('Выполняется graceful shutdown...');
-  await sequelize.close();
-  logger.info('Соединение с базой данных закрыто');
-  process.exit(0);
+  pool.end((err) => {
+    if (err) logger.error(`Ошибка закрытия пула: ${err.message}`);
+    logger.info('Соединение с базой данных закрыто');
+    process.exit(0);
+  });
 }
 
 process.on('SIGINT', shutdown);
