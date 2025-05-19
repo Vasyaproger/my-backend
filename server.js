@@ -37,6 +37,7 @@ const s3 = new AWS.S3({
   secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
   region: 'ru-1',
   s3ForcePathStyle: true,
+  httpOptions: { timeout: 30000 }, // Увеличенный тайм-аут для больших файлов
 });
 
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
@@ -44,7 +45,7 @@ const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 // Middleware для безопасности и обработки запросов
 app.use(helmet()); // Защита от уязвимостей
 app.use(cors({
-  origin: ['https://24webstudio.ru', 'http://localhost:3000'], // Разрешенные домены
+  origin: ['https://24webstudio.ru', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -158,6 +159,7 @@ const App = sequelize.define('App', {
   name: {
     type: DataTypes.STRING,
     allowNull: false,
+    unique: true, // Уникальность имени приложения
   },
   description: {
     type: DataTypes.TEXT,
@@ -258,7 +260,7 @@ async function uploadToS3(file, folder) {
     logger.info(`Файл загружен в S3: ${key}`);
     return Location;
   } catch (error) {
-    logger.error(`Ошибка загрузки в S3: ${error.message}`);
+    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}`);
     throw new Error(`Ошибка загрузки файла в S3: ${error.message}`);
   }
 }
@@ -277,7 +279,7 @@ try {
   logger.info('Telegram-бот успешно инициализирован');
 } catch (error) {
   logger.error(`Ошибка инициализации Telegram-бота: ${error.message}`);
-  bot = null; // Устанавливаем null при ошибке
+  bot = null;
 }
 
 // Обработка команды /start для Telegram-бота
@@ -338,7 +340,7 @@ async function sendTelegramMessage(telegramId, message) {
     await bot.sendMessage(chatId, message);
     logger.info(`Сообщение отправлено на chat ID ${chatId}`);
   } catch (error) {
-    logger.error(`Ошибка отправки сообщения на Telegram ID ${telegramId}: ${error.message}`);
+    logger.error(`Ошибка ارسال сообщения на Telegram ID ${telegramId}: ${error.message}`);
   }
 }
 
@@ -687,14 +689,12 @@ app.post(
       const { email, password } = req.body;
       logger.info(`Попытка входа для email: ${email}`);
 
-      // Поиск пользователя
       const user = await User.findOne({ where: { email } });
       if (!user) {
         logger.warn(`Пользователь с email ${email} не найден`);
         return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
-      // Проверка пароля
       if (!user.password) {
         logger.error(`Пароль отсутствует для пользователя ${email}`);
         return res.status(500).json({ message: 'Ошибка сервера: пользовательская запись повреждена' });
@@ -705,7 +705,6 @@ app.post(
         return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
-      // Проверка существующего токена
       let token = user.jwtToken;
       if (!token || !isValidJwt(token)) {
         token = jwt.sign(
@@ -723,7 +722,6 @@ app.post(
         }
       }
 
-      // Отправка сообщения в Telegram
       let message = `🔐 Вы вошли в PlayEvit с email: ${user.email}`;
       if (!user.telegramId) {
         message = 'Ваш Telegram ID отсутствует. Отправьте /start боту и обновите профиль в настройках.';
@@ -792,7 +790,7 @@ app.post(
         { expiresIn: '1h' }
       );
       user.resetPasswordToken = resetToken;
-      user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 час
+      user.resetPasswordExpires = new Date(Date.now() + 3600000);
       await user.save();
 
       if (user.telegramId) {
@@ -1001,12 +999,16 @@ app.post(
     }
 
     try {
+      logger.info(`Попытка создания приложения для пользователя ID: ${req.user.id}`);
+
+      // Проверка пользователя
       const user = await User.findByPk(req.user.id);
       if (!user) {
         logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
         return res.status(404).json({ message: 'Пользователь не найден' });
       }
 
+      // Проверка верификации
       if (!user.isVerified) {
         logger.warn(`Пользователь не верифицирован: ${user.email}`);
         return res.status(403).json({ message: 'Требуется верифицированный аккаунт для отправки приложений' });
@@ -1015,6 +1017,14 @@ app.post(
       const { name, description, category } = req.body;
       const files = req.files;
 
+      // Проверка существования приложения
+      const existingApp = await App.findOne({ where: { name } });
+      if (existingApp) {
+        logger.warn(`Приложение с именем "${name}" уже существует`);
+        return res.status(400).json({ message: 'Приложение с таким именем уже существует' });
+      }
+
+      // Проверка файлов
       if (!files || !files.icon || !files.icon[0]) {
         logger.warn('Отсутствует файл иконки');
         return res.status(400).json({ message: 'Требуется иконка (JPG, JPEG или PNG)' });
@@ -1024,9 +1034,13 @@ app.post(
         return res.status(400).json({ message: 'Требуется APK файл' });
       }
 
+      // Загрузка файлов в S3
+      logger.info(`Загрузка иконки в S3 для приложения: ${name}`);
       const iconUrl = await uploadToS3(files.icon[0], 'icons');
+      logger.info(`Загрузка APK в S3 для приложения: ${name}`);
       const apkUrl = await uploadToS3(files.apk[0], 'apks');
 
+      // Создание записи приложения
       const app = await App.create({
         name,
         description,
@@ -1038,17 +1052,28 @@ app.post(
         downloads: 0,
       });
 
+      // Отправка уведомления в Telegram
       if (user.telegramId) {
-        await sendTelegramMessage(
-          user.telegramId,
-          `🚀 Приложение "${name}" отправлено на проверку! Уведомим, когда будет обработано.`
-        );
+        try {
+          await sendTelegramMessage(
+            user.telegramId,
+            `🚀 Приложение "${name}" отправлено на проверку! Уведомим, когда будет обработано.`
+          );
+        } catch (telegramError) {
+          logger.warn(`Ошибка отправки Telegram уведомления для ${user.email}: ${telegramError.message}`);
+        }
       }
 
-      logger.info(`Приложение создано ${user.email}: ${name}`);
+      logger.info(`Приложение создано для ${user.email}: ${name}`);
       res.status(201).json({ message: 'Приложение успешно отправлено', app });
     } catch (error) {
       logger.error(`Ошибка создания приложения: ${error.message}`);
+      if (error.message.includes('S3')) {
+        return res.status(500).json({ message: 'Ошибка загрузки файлов в S3', error: error.message });
+      }
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        return res.status(400).json({ message: 'Приложение с таким именем уже существует' });
+      }
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
