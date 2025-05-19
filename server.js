@@ -1,4 +1,4 @@
-// Подключение модулей
+// Подключение необходимых модулей
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
 const mysql2 = require('mysql2');
@@ -13,10 +13,10 @@ const { body, validationResult } = require('express-validator');
 const winston = require('winston');
 const AWS = require('aws-sdk');
 
-// Инициализация приложения
+// Инициализация приложения Express
 const app = express();
 
-// Настройка логгера
+// Настройка логгера для записи логов
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -30,27 +30,27 @@ const logger = winston.createLogger({
   ],
 });
 
-// Настройка AWS S3
+// Настройка AWS S3 для хранения файлов
 const s3 = new AWS.S3({
   endpoint: 'https://s3.twcstorage.ru',
-  accessKeyId: 'DN1NLZTORA2L6NZ529JJ', // Замените на ваш S3 Access Key
-  secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8', // Замените на ваш S3 Secret Key
+  accessKeyId: 'DN1NLZTORA2L6NZ529JJ',
+  secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
   region: 'ru-1',
   s3ForcePathStyle: true,
 });
 
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 
-// Middleware
-app.use(helmet());
+// Middleware для безопасности и обработки запросов
+app.use(helmet()); // Защита от уязвимостей
 app.use(cors({
-  origin: '*', // В продакшене замените на конкретный домен
+  origin: ['https://24webstudio.ru', 'http://localhost:3000'], // Разрешенные домены
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use(express.json());
+app.use(express.json()); // Парсинг JSON-запросов
 
-// Подключение к базе данных
+// Подключение к базе данных MySQL
 const sequelize = new Sequelize({
   dialect: 'mysql',
   host: 'vh438.timeweb.ru',
@@ -191,10 +191,10 @@ const App = sequelize.define('App', {
   tableName: 'Apps',
 });
 
-// Настройка загрузки файлов в S3
+// Настройка загрузки файлов с помощью Multer
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 МБ
+  limits: { fileSize: 100 * 1024 * 1024 }, // Лимит 100 МБ
   fileFilter: (req, file, cb) => {
     if (file.fieldname === 'documents') {
       const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
@@ -239,19 +239,19 @@ const upload = multer({
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
-  
+
   const params = {
     Bucket: BUCKET_NAME,
     Key: key,
     Body: file.buffer,
     ContentType: file.mimetype,
-    ACL: 'public-read', // Доступ для чтения
+    ACL: 'public-read',
   };
 
   try {
-    await s3.upload(params).promise();
+    const { Location } = await s3.upload(params).promise();
     logger.info(`Файл загружен в S3: ${key}`);
-    return `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
+    return Location;
   } catch (error) {
     logger.error(`Ошибка загрузки в S3: ${error.message}`);
     throw new Error(`Ошибка загрузки файла в S3: ${error.message}`);
@@ -269,30 +269,33 @@ try {
       params: { timeout: 10 },
     },
   });
-  logger.info('Telegram-бот инициализирован');
+  logger.info('Telegram-бот успешно инициализирован');
 } catch (error) {
   logger.error(`Ошибка инициализации Telegram-бота: ${error.message}`);
+  bot = null; // Устанавливаем null при ошибке
 }
 
-// Обработка команды /start
-bot?.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  const username = msg.from.username || `user_${chatId}`;
-  try {
-    await TelegramMapping.upsert({
-      username: `@${username.replace(/^@/, '')}`,
-      chatId: chatId.toString(),
-    });
-    await bot.sendMessage(
-      chatId,
-      `🌟 Добро пожаловать в PlayEvit!\nВаш Telegram chat ID: ${chatId}\nИспользуйте этот ID или имя (@${username}) при регистрации.\nУведомления будут здесь!`
-    );
-    logger.info(`Зарегистрирован chat ID ${chatId} для @${username}`);
-  } catch (error) {
-    logger.error(`Ошибка сохранения маппинга для chat ID ${chatId}: ${error.message}`);
-    await bot.sendMessage(chatId, 'Ошибка сохранения chat ID. Попробуйте снова или обратитесь в поддержку.');
-  }
-});
+// Обработка команды /start для Telegram-бота
+if (bot) {
+  bot.onText(/\/start/, async (msg) => {
+    const chatId = msg.chat.id;
+    const username = msg.from.username || `user_${chatId}`;
+    try {
+      await TelegramMapping.upsert({
+        username: `@${username.replace(/^@/, '')}`,
+        chatId: chatId.toString(),
+      });
+      await bot.sendMessage(
+        chatId,
+        `🌟 Добро пожаловать в PlayEvit!\nВаш Telegram chat ID: ${chatId}\nИспользуйте этот ID или имя (@${username}) при регистрации.\nУведомления будут здесь!`
+      );
+      logger.info(`Зарегистрирован chat ID ${chatId} для @${username}`);
+    } catch (error) {
+      logger.error(`Ошибка сохранения маппинга для chat ID ${chatId}: ${error.message}`);
+      await bot.sendMessage(chatId, 'Ошибка сохранения chat ID. Попробуйте снова или обратитесь в поддержку.');
+    }
+  });
+}
 
 // Разрешение Telegram ID
 async function resolveTelegramId(telegramId) {
@@ -334,7 +337,7 @@ async function sendTelegramMessage(telegramId, message) {
   }
 }
 
-// Отправка верификационного сообщения
+// Отправка верификационного сообщения в Telegram
 async function sendVerificationTelegram(telegramId, email, token) {
   if (!bot) {
     logger.warn('Telegram-бот не инициализирован, пропуск верификации');
@@ -362,7 +365,7 @@ ${verificationUrl}
   }
 }
 
-// Отправка сообщения для сброса пароля
+// Отправка сообщения для сброса пароля в Telegram
 async function sendPasswordResetTelegram(telegramId, token) {
   if (!bot) {
     logger.warn('Telegram-бот не инициализирован, пропуск сброса пароля');
@@ -389,7 +392,7 @@ ${resetUrl}
   }
 }
 
-// Middleware для проверки JWT
+// Middleware для проверки JWT-токена
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -398,25 +401,28 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ message: 'Требуется токен авторизации' });
   }
   try {
-    const decoded = jwt.verify(token, 'your_jwt_secret');
+    const decoded = jwt.verify(token, 'my_jwt_secret');
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error(`Недействительный токен: ${error.message}`);
-    return res.status(403).json({ message: 'Недействительный или истекший токен' });
+    logger.error(`Ошибка верификации токена: ${error.message}`);
+    if (error.name === 'TokenExpiredError') {
+      return res.status(403).json({ message: 'Токен истек' });
+    }
+    return res.status(403).json({ message: 'Недействительный токен' });
   }
 };
 
 // Синхронизация базы данных
 sequelize.sync({ alter: true }).then(() => {
-  logger.info('База данных синхронизирована');
+  logger.info('База данных успешно синхронизирована');
 }).catch((error) => {
   logger.error(`Ошибка синхронизации базы данных: ${error.message}`);
 });
 
-// Маршруты
+// Маршруты API
 
-// Предрегистрация
+// Предрегистрация пользователя
 app.post(
   '/api/pre-register',
   [
@@ -505,13 +511,13 @@ app.post(
       const hashedPassword = await bcrypt.hash(password, salt);
       const verificationToken = jwt.sign(
         { email },
-        'your_jwt_secret',
+        'my_jwt_secret',
         { expiresIn: '100y' }
       );
 
       const authToken = jwt.sign(
         { email, accountType, name, telegramId },
-        'your_jwt_secret',
+        'my_jwt_secret',
         { expiresIn: '7d' }
       );
 
@@ -562,7 +568,7 @@ app.get('/api/auth/verify/:token', async (req, res) => {
     const { token } = req.params;
     let decoded;
     try {
-      decoded = jwt.verify(token, 'your_jwt_secret');
+      decoded = jwt.verify(token, 'my_jwt_secret');
     } catch (error) {
       logger.warn(`Недействительный токен верификации: ${error.message}`);
       return res.status(400).json({ message: 'Недействительный или истекший токен' });
@@ -617,7 +623,7 @@ app.post(
       const { email, token } = req.body;
       let decoded;
       try {
-        decoded = jwt.verify(token, 'your_jwt_secret');
+        decoded = jwt.verify(token, 'my_jwt_secret');
       } catch (error) {
         logger.warn(`Недействительный токен в форме: ${error.message}`);
         return res.status(400).json({ message: 'Недействительный или истекший токен' });
@@ -648,7 +654,9 @@ app.post(
       await user.save();
 
       if (user.telegramId) {
-        await sendTelegramMessage(user.telegramId, `✅ Ваш email (${user.email}) верифицирован! Добро пожаловать в PlayEvit!`);
+        await sendTelegramMessage(user.telegramId, `✅ Ваш email (${user.email}) верифицирован! Добро пожаловать в
+
+System: PlayEvit!`);
       }
 
       logger.info(`Email верифицирован через форму для ${user.email}`);
@@ -660,7 +668,7 @@ app.post(
   }
 );
 
-// Авторизация
+// Авторизация пользователя
 app.post(
   '/api/auth/login',
   [
@@ -689,10 +697,10 @@ app.post(
       }
 
       let token = user.jwtToken;
-      if (!token) {
+      if (!token || !jwt.verify(token, 'my_jwt_secret', { ignoreExpiration: true })) {
         token = jwt.sign(
           { id: user.id, email: user.email },
-          'your_jwt_secret',
+          'my_jwt_secret',
           { expiresIn: '7d' }
         );
         user.jwtToken = token;
@@ -701,7 +709,7 @@ app.post(
 
       let message = `🔐 Вы вошли в PlayEvit с email: ${user.email}`;
       if (!user.telegramId) {
-        message = 'Ваш Telegram ID отсутствует. Отправьте /start боту и обновите профиль в настройках.';
+        message = 'Ваш Telegram ID отсутствует. Отправьте /start б  боту и обновите профиль в настройках.';
       } else {
         await sendTelegramMessage(user.telegramId, message);
       }
@@ -747,11 +755,11 @@ app.post(
 
       const resetToken = jwt.sign(
         { email },
-        'your_jwt_secret',
+        'my_jwt_secret',
         { expiresIn: '1h' }
       );
       user.resetPasswordToken = resetToken;
-      user.resetPasswordExpires = new Date(Date.now() + 3600000);
+      user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 час
       await user.save();
 
       if (user.telegramId) {
@@ -791,7 +799,7 @@ app.post(
       const { password } = req.body;
       let decoded;
       try {
-        decoded = jwt.verify(token, 'your_jwt_secret');
+        decoded = jwt.verify(token, 'my_jwt_secret');
       } catch (error) {
         logger.warn(`Недействительный токен сброса: ${error.message}`);
         return res.status(400).json({ message: 'Недействительный или истекший токен' });
@@ -829,7 +837,7 @@ app.post(
   }
 );
 
-// Получение профиля
+// Получение профиля пользователя
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
@@ -846,7 +854,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление профиля
+// Обновление профиля пользователя
 app.put(
   '/api/user/profile',
   authenticateToken,
@@ -903,7 +911,7 @@ app.put(
   }
 );
 
-// Обновление документов
+// Обновление документов пользователя
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -950,7 +958,7 @@ app.post(
   [
     body('name').notEmpty().trim().withMessage('Требуется название приложения'),
     body('description').notEmpty().trim().withMessage('Требуется описание'),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Недопустимая категория: выберите games, productivity, education, entertainment'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Недопустимая категория'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
