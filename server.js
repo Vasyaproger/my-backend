@@ -3,18 +3,49 @@ const { Sequelize, DataTypes } = require('sequelize');
 const mysql2 = require('mysql2');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const TelegramBot = require('node-telegram-bot-api');
 const multer = require('multer');
 const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
-const fs = require('fs').promises;
+const { S3Client, PutObjectCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const app = express();
 
-// Logger setup
+// Проверка обязательных переменных окружения
+const requiredEnvVars = [
+  'JWT_SECRET',
+  'DB_HOST',
+  'DB_USER',
+  'DB_PASSWORD',
+  'DB_NAME',
+  'S3_ACCESS_KEY',
+  'S3_SECRET_KEY',
+];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`Ошибка: Переменная окружения ${envVar} не задана`);
+    process.exit(1);
+  }
+}
+
+// Конфигурация переменных окружения
+const JWT_SECRET = process.env.JWT_SECRET;
+const DB_HOST = process.env.DB_HOST;
+const DB_USER = process.env.DB_USER;
+const DB_PASSWORD = process.env.DB_PASSWORD;
+const DB_NAME = process.env.DB_NAME;
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY;
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || 'https://your-frontend-domain.com';
+const PORT = process.env.PORT || 5000;
+const BUCKET_NAME = process.env.S3_BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+// Логирование
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -28,52 +59,89 @@ const logger = winston.createLogger({
   ],
 });
 
+// AWS S3 (v3)
+const s3Client = new S3Client({
+  endpoint: 'https://s3.twcstorage.ru',
+  credentials: {
+    accessKeyId: S3_ACCESS_KEY,
+    secretAccessKey: S3_SECRET_KEY,
+  },
+  region: 'ru-1',
+  forcePathStyle: true,
+});
+
+// Проверка подключения к S3
+async function checkS3Connection() {
+  try {
+    await s3Client.send(new ListBucketsCommand({}));
+    logger.info('Подключение к S3 успешно');
+  } catch (err) {
+    logger.error(`Ошибка подключения к S3: ${err.message}`);
+    throw err;
+  }
+}
+
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: '*', // Для локальной разработки; замените на конкретный домен в продакшене
+  origin: CORS_ORIGIN,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'Uploads'), {
-  setHeaders: (res) => {
-    res.set('Access-Control-Allow-Origin', '*');
-  }
-}));
 
-// Ensure upload directories exist
-const ensureDirectories = async () => {
-  const dirs = [
-    path.join(__dirname, 'Uploads/documents'),
-    path.join(__dirname, 'Uploads/icons'),
-    path.join(__dirname, 'Uploads/apks'),
-  ];
-  for (const dir of dirs) {
-    try {
-      await fs.mkdir(dir, { recursive: true });
-      await fs.chmod(dir, 0o755); // Устанавливаем права доступа
-      logger.info(`Created directory: ${dir}`);
-    } catch (error) {
-      logger.error(`Failed to create directory ${dir}: ${error.message}`);
-    }
-  }
-};
-ensureDirectories();
-
-// Database connection
+// Подключение к базе данных
 const sequelize = new Sequelize({
   dialect: 'mysql',
-  host: process.env.DB_HOST || 'vh438.timeweb.ru',
-  username: process.env.DB_USER || 'ch79145_project',
-  password: process.env.DB_PASS || 'Vasya11091109',
-  database: 'ch79145_project',
+  host: DB_HOST,
+  username: DB_USER,
+  password: DB_PASSWORD,
+  database: DB_NAME,
   port: 3306,
   dialectModule: mysql2,
   logging: (msg) => logger.debug(msg),
+  pool: {
+    max: 10,
+    min: 0,
+    acquire: 30000,
+    idle: 10000,
+  },
+  dialectOptions: {
+    ssl: {
+      require: process.env.DB_SSL === 'true',
+      rejectUnauthorized: false,
+    },
+    connectTimeout: 30000,
+  },
 });
 
-// User model
+// Механизм повторного подключения к базе данных
+async function connectWithRetry(maxRetries = 5, retryDelay = 20000) {
+  logger.info('Начало попыток подключения к MySQL');
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await sequelize.authenticate();
+      logger.info('Подключение к базе данных успешно');
+      return;
+    } catch (error) {
+      logger.error(`Попытка ${attempt} не удалась: ${error.message}`);
+      if (error.message.includes('Host') && error.message.includes('blocked')) {
+        logger.error('Хост заблокирован MySQL. Выполните "mysqladmin flush-hosts" на сервере.');
+      }
+      if (error.message.includes('caching_sha2_password')) {
+        logger.error('Ошибка аутентификации. Убедитесь, что пользователь использует caching_sha2_password.');
+      }
+      if (attempt === maxRetries) {
+        logger.error('Не удалось подключиться к базе данных после всех попыток');
+        throw new Error('Не удалось подключиться к базе данных');
+      }
+      logger.info(`Повторная попытка через ${retryDelay / 1000} секунд...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+  }
+}
+
+// Модель User
 const User = sequelize.define('User', {
   email: {
     type: DataTypes.STRING,
@@ -97,10 +165,6 @@ const User = sequelize.define('User', {
     type: DataTypes.STRING,
     allowNull: false,
   },
-  telegramId: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
   addressStreet: { type: DataTypes.STRING },
   addressCity: { type: DataTypes.STRING },
   addressCountry: { type: DataTypes.STRING },
@@ -112,11 +176,8 @@ const User = sequelize.define('User', {
   },
   isVerified: {
     type: DataTypes.BOOLEAN,
-    defaultValue: false,
+    defaultValue: true, // Автоматическая верификация
   },
-  verificationToken: { type: DataTypes.STRING },
-  resetPasswordToken: { type: DataTypes.STRING },
-  resetPasswordExpires: { type: DataTypes.DATE },
   jwtToken: {
     type: DataTypes.STRING,
     allowNull: true,
@@ -126,7 +187,7 @@ const User = sequelize.define('User', {
   tableName: 'Users',
 });
 
-// PreRegister model
+// Модель PreRegister
 const PreRegister = sequelize.define('PreRegister', {
   email: {
     type: DataTypes.STRING,
@@ -134,32 +195,12 @@ const PreRegister = sequelize.define('PreRegister', {
     unique: true,
     validate: { isEmail: true },
   },
-  telegramId: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
 }, {
   timestamps: true,
   tableName: 'PreRegisters',
 });
 
-// TelegramMapping model
-const TelegramMapping = sequelize.define('TelegramMapping', {
-  username: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    unique: true,
-  },
-  chatId: {
-    type: DataTypes.STRING,
-    allowNull: false,
-  },
-}, {
-  timestamps: true,
-  tableName: 'TelegramMappings',
-});
-
-// App model
+// Модель App
 const App = sequelize.define('App', {
   name: {
     type: DataTypes.STRING,
@@ -198,52 +239,49 @@ const App = sequelize.define('App', {
   tableName: 'Apps',
 });
 
-// File upload setup
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    if (file.fieldname === 'documents') {
-      cb(null, './Uploads/documents/');
-    } else if (file.fieldname === 'icon') {
-      cb(null, './Uploads/icons/');
-    } else if (file.fieldname === 'apk') {
-      cb(null, './Uploads/apks/');
-    } else {
-      cb(new Error('Invalid field name'), null);
-    }
-  },
-  filename: (req, file, cb) => {
-    const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
-    cb(null, `${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`);
-  },
-});
-
+// Настройка загрузки файлов
 const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.fieldname === 'documents') {
-      const filetypes = /pdf|jpg|jpeg|png/;
-      const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = filetypes.test(file.mimetype);
+      const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+      const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
+      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
         return cb(null, true);
       }
-      cb(new Error('Only PDF, JPG, JPEG, and PNG files allowed for documents!'));
+      logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
     } else if (file.fieldname === 'icon') {
-      const filetypes = /jpg|jpeg|png/;
-      const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = filetypes.test(file.mimetype);
+      const validMimeTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+      const validExtensions = /\.(jpg|jpeg|png)$/i;
+      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
         return cb(null, true);
       }
-      cb(new Error('Only JPG, JPEG, and PNG files allowed for icons!'));
+      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Разрешены только файлы JPG, JPEG и PNG для иконок!'));
     } else if (file.fieldname === 'apk') {
-      if (file.originalname.toLowerCase().endsWith('.apk')) {
+      const extname = file.originalname.toLowerCase().endsWith('.apk');
+      const validMimeTypes = [
+        'application/vnd.android.package-archive',
+        'application/octet-stream',
+        'application/x-apk',
+        'application/zip',
+      ];
+      const mimetype = validMimeTypes.includes(file.mimetype);
+      if (extname && mimetype) {
+        logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
-      cb(new Error('Only APK files allowed!'));
+      logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Разрешены только файлы APK!'));
     } else {
-      cb(new Error('Invalid field name!'));
+      logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
+      cb(new Error('Недопустимое имя поля!'));
     }
   },
 }).fields([
@@ -252,251 +290,158 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// Telegram bot setup
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
-let bot;
-try {
-  bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
-    polling: {
-      interval: 300,
-      autoStart: true,
-      params: { timeout: 10 },
-    },
-  });
-  logger.info('Telegram bot initialized');
-} catch (error) {
-  logger.error(`Failed to initialize Telegram bot: ${error.message}`);
-}
+// Функция загрузки в S3 (v3)
+async function uploadToS3(file, folder) {
+  const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
+  const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
 
-// Telegram /start command
-bot?.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  const username = msg.from.username || `user_${chatId}`;
+  const params = {
+    Bucket: BUCKET_NAME,
+    Key: key,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+    ACL: 'public-read',
+  };
+
   try {
-    await TelegramMapping.upsert({
-      username: `@${username.replace(/^@/, '')}`,
-      chatId: chatId.toString(),
-    });
-    await bot.sendMessage(
-      chatId,
-      `🌟 Welcome to PlayEvit!\nYour Telegram chat ID: ${chatId}\nUse this ID or your username (@${username}) during registration.\nWe'll send notifications here!`
-    );
-    logger.info(`Captured chat ID ${chatId} for username @${username}`);
+    await s3Client.send(new PutObjectCommand(params));
+    const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
+    logger.info(`Файл загружен в S3: ${key}`);
+    return location;
   } catch (error) {
-    logger.error(`Error saving Telegram mapping for chat ID ${chatId}: ${error.message}`);
-    await bot.sendMessage(chatId, 'Error saving your chat ID. Try again or contact support.');
-  }
-});
-
-// Resolve Telegram ID
-async function resolveTelegramId(telegramId) {
-  if (!telegramId) {
-    throw new Error('Telegram ID is required');
-  }
-  if (/^\d+$/.test(telegramId)) {
-    const mapping = await TelegramMapping.findOne({ where: { chatId: telegramId } });
-    if (!mapping) {
-      throw new Error(`Chat ID ${telegramId} not found. Send /start to the bot.`);
-    }
-    return telegramId;
-  }
-  const username = telegramId.startsWith('@') ? telegramId : `@${telegramId}`;
-  const mapping = await TelegramMapping.findOne({ where: { username } });
-  if (!mapping) {
-    throw new Error(`Username ${telegramId} not found. Send /start to the bot.`);
-  }
-  return mapping.chatId;
-}
-
-// Send Telegram message
-async function sendTelegramMessage(telegramId, message) {
-  if (!bot) {
-    logger.warn('Telegram bot not initialized, skipping message send');
-    return;
-  }
-  try {
-    const chatId = await resolveTelegramId(telegramId);
-    await bot.sendMessage(chatId, message);
-    logger.info(`Message sent to chat ID ${chatId}`);
-  } catch (error) {
-    logger.error(`Error sending message to Telegram ID ${telegramId}: ${error.message}`);
+    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}`);
+    throw new Error(`Ошибка загрузки в S3: ${error.message}`);
   }
 }
 
-// Send verification message
-async function sendVerificationTelegram(telegramId, email, token) {
-  if (!bot) {
-    logger.warn('Telegram bot not initialized, skipping verification message');
-    return;
-  }
-  try {
-    const chatId = await resolveTelegramId(telegramId);
-    const verificationUrl = `https://vasyaproger-my-backend-9f42.twc1.net/api/auth/verify/${token}`;
-    const message = `
-🌟 Welcome to PlayEvit, ${telegramId}! 🌟
-Verify your email (${email}) by clicking the link:
-${verificationUrl}
-Or use the token in the verification form on the website:
-Token: ${token}
-🔗 Token valid for 100 years.
-`;
-    await bot.sendMessage(chatId, message);
-    logger.info(`Verification message sent to chat ID ${chatId}`);
-  } catch (error) {
-    logger.error(`Error sending verification message to Telegram ID ${telegramId}: ${error.message}`);
-  }
-}
-
-// Send password reset message
-async function sendPasswordResetTelegram(telegramId, token) {
-  if (!bot) {
-    logger.warn('Telegram bot not initialized, skipping password reset message');
-    return;
-  }
-  try {
-    const chatId = await resolveTelegramId(telegramId);
-    const resetUrl = `https://vasyaproger-my-backend-9f42.twc1.net/reset-password/${token}`;
-    const message = `
-🔐 Password Reset for PlayEvit 🔐
-You requested a password reset. Click the link:
-${resetUrl}
-🔗 Link valid for 1 hour.
-If you didn't request this, ignore this message.
-`;
-    await bot.sendMessage(chatId, message);
-    logger.info(`Password reset message sent to chat ID ${chatId}`);
-  } catch (error) {
-    logger.error(`Error sending password reset message to Telegram ID ${telegramId}: ${error.message}`);
-  }
-}
-
-// JWT authentication middleware
+// Middleware аутентификации JWT
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
-    logger.warn('Authorization token missing');
-    return res.status(401).json({ message: 'Authorization token required' });
+    logger.warn('Токен авторизации отсутствует');
+    return res.status(401).json({ message: 'Требуется токен авторизации' });
   }
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
   } catch (error) {
-    logger.error(`Invalid token: ${error.message}`);
-    return res.status(403).json({ message: 'Invalid or expired token' });
+    logger.error(`Недействительный токен: ${error.message}`);
+    return res.status(403).json({ message: 'Недействительный или истёкший токен' });
   }
 };
 
-// Database synchronization
-sequelize.sync({ alter: true }).then(() => {
-  logger.info('Database synchronized');
-}).catch((error) => {
-  logger.error(`Error synchronizing database: ${error.message}`);
-});
+// Синхронизация базы данных
+async function syncDatabase() {
+  try {
+    logger.info('Начало синхронизации базы данных');
+    await sequelize.sync({ force: false });
+    logger.info('База данных успешно синхронизирована');
 
-// Routes
+    const tablesToCheck = ['Users', 'PreRegisters', 'Apps'];
+    for (const table of tablesToCheck) {
+      const [results] = await sequelize.query(`SHOW TABLES LIKE '${table}'`);
+      if (results.length > 0) {
+        logger.info(`Таблица ${table} существует`);
+      } else {
+        logger.error(`Таблица ${table} не создана`);
+        throw new Error(`Не удалось создать таблицу ${table}`);
+      }
+    }
+  } catch (error) {
+    logger.error(`Ошибка синхронизации базы данных: ${error.message}`);
+    throw error;
+  }
+}
 
-// Pre-registration
+// Инициализация приложения
+async function initializeApp() {
+  logger.info('Инициализация приложения');
+  try {
+    await connectWithRetry();
+    await syncDatabase();
+    await checkS3Connection();
+    logger.info('Приложение успешно инициализировано');
+  } catch (error) {
+    logger.error(`Критическая ошибка инициализации: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+// Маршруты
+
+// Предварительная регистрация
 app.post(
   '/api/pre-register',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('telegramId').optional().trim().custom((value) => {
-      if (!value || /^\d+$/.test(value) || /^@/.test(value)) {
-        return true;
-      }
-      throw new Error('Telegram ID must be a numeric chat ID or username with @');
-    }),
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
-      const { email, telegramId } = req.body;
-
+      const { email } = req.body;
       const existingPreRegister = await PreRegister.findOne({ where: { email } });
       if (existingPreRegister) {
-        return res.status(400).json({ message: 'This email is already in the waitlist' });
+        return res.status(400).json({ message: 'Этот email уже в списке ожидания' });
       }
 
-      const preRegister = await PreRegister.create({ email, telegramId });
-
-      let message = `🌟 Thank you for your interest in PlayEvit!\nYour email (${email}) has been added to the waitlist.\nWe'll notify you about the launch in 2025!`;
-      if (telegramId) {
-        try {
-          await sendTelegramMessage(telegramId, message);
-        } catch (error) {
-          message = 'We couldn’t send a Telegram message. Ensure you sent /start to the bot.';
-        }
-      }
-
-      logger.info(`Pre-registration: ${email}`);
-      res.status(201).json({ message });
+      await PreRegister.create({ email });
+      logger.info(`Предварительная регистрация: ${email}`);
+      res.status(201).json({ message: `Спасибо за интерес! Ваш email (${email}) добавлен в список ожидания.` });
     } catch (error) {
-      logger.error(`Pre-registration error: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка предварительной регистрации: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// User registration
+// Регистрация пользователя
 app.post(
   '/api/auth/register',
   upload,
   [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-    body('accountType').isIn(['individual', 'commercial']).withMessage('Invalid account type'),
-    body('name').notEmpty().trim().withMessage('Name is required'),
-    body('phone').notEmpty().trim().withMessage('Phone number is required'),
-    body('telegramId').notEmpty().trim().custom((value) => {
-      if (/^\d+$/.test(value) || /^@/.test(value)) {
-        return true;
-      }
-      throw new Error('Telegram ID must be a numeric chat ID or username with @');
-    }).withMessage('Invalid Telegram ID'),
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('password').isLength({ min: 8 }).withMessage('Пароль должен быть минимум 8 символов'),
+    body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
+    body('name').notEmpty().trim().withMessage('Требуется имя'),
+    body('phone').notEmpty().trim().withMessage('Требуется номер телефона'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const {
-        email, password, accountType, name, phone, telegramId,
+        email, password, accountType, name, phone,
         addressStreet, addressCity, addressCountry, addressPostalCode,
       } = req.body;
 
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('No documents uploaded during registration');
-        return res.status(400).json({ message: 'At least one document is required' });
+        logger.warn('Документы не загружены при регистрации');
+        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
       const existingUser = await User.findOne({ where: { email } });
       if (existingUser) {
-        return res.status(400).json({ message: 'Email already registered' });
+        return res.status(400).json({ message: 'Email уже зарегистрирован' });
       }
+
+      const documentUrls = await Promise.all(
+        req.files.documents.map(file => uploadToS3(file, 'documents'))
+      );
 
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
-      const verificationToken = jwt.sign(
-        { email },
-        process.env.JWT_SECRET || 'your_jwt_secret',
-        { expiresIn: '100y' }
-      );
-
-      const authToken = jwt.sign(
-        { email, accountType, name, telegramId },
-        process.env.JWT_SECRET || 'your_jwt_secret',
-        { expiresIn: '7d' }
-      );
+      const authToken = jwt.sign({ email, accountType, name }, JWT_SECRET, { expiresIn: '7d' });
 
       const user = await User.create({
         email,
@@ -504,207 +449,64 @@ app.post(
         accountType,
         name,
         phone,
-        telegramId,
         addressStreet,
         addressCity,
         addressCountry,
         addressPostalCode,
-        documents: req.files.documents.map(file => file.path),
-        verificationToken,
+        documents: documentUrls,
+        isVerified: true,
         jwtToken: authToken,
       });
 
-      try {
-        await sendVerificationTelegram(telegramId, email, verificationToken);
-        logger.info(`User registered: ${email}`);
-        res.status(201).json({
-          message: `Registration successful! Check your Telegram (${telegramId}) for verification.`,
-          token: authToken,
-          user: {
-            id: user.id,
-            email: user.email,
-            accountType: user.accountType,
-            name: user.name,
-            telegramId: user.telegramId,
-          },
-        });
-      } catch (telegramError) {
-        logger.warn(`Telegram message not sent for ${email}: ${telegramError.message}`);
-        res.status(201).json({
-          message: `Registration successful, but Telegram message failed. Send /start to the bot with your ${telegramId}.`,
-          token: authToken,
-          user: {
-            id: user.id,
-            email: user.email,
-            accountType: user.accountType,
-            name: user.name,
-            telegramId: user.telegramId,
-          },
-        });
-      }
+      logger.info(`Пользователь зарегистрирован: ${email}`);
+      res.status(201).json({
+        message: 'Регистрация успешна!',
+        token: authToken,
+        user: { id: user.id, email, accountType, name, phone },
+      });
     } catch (error) {
-      logger.error(`Registration error: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка регистрации: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Email verification via link
-app.get('/api/auth/verify/:token', async (req, res) => {
-  try {
-    const { token } = req.params;
-    let decoded;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
-    } catch (error) {
-      logger.warn(`Invalid verification token: ${error.message}`);
-      return res.status(400).json({ message: 'Invalid or expired token' });
-    }
-
-    const user = await User.findOne({ where: { email: decoded.email } });
-    if (!user) {
-      logger.warn(`User with email ${decoded.email} not found`);
-      return res.status(400).json({ message: 'User not found' });
-    }
-
-    if (user.verificationToken !== token) {
-      logger.warn(`Verification token mismatch for email ${decoded.email}`);
-      return res.status(400).json({ message: 'Invalid token' });
-    }
-
-    if (user.isVerified) {
-      return res.status(200).json({ message: 'Email already verified' });
-    }
-
-    user.isVerified = true;
-    user.verificationToken = null;
-    await user.save();
-
-    try {
-      await sendTelegramMessage(user.telegramId, `✅ Your email (${user.email}) is verified! Welcome to PlayEvit!`);
-    } catch (telegramError) {
-      logger.warn(`Failed to send verification message to Telegram for ${user.email}: ${telegramError.message}`);
-    }
-
-    logger.info(`Email verified for ${user.email}`);
-    res.status(200).json({ message: 'Email verified successfully!' });
-  } catch (error) {
-    logger.error(`Verification error: ${error.message}`);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Email verification via form
-app.post(
-  '/api/auth/verify-form',
-  [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('token').notEmpty().trim().withMessage('Token is required'),
-  ],
-  async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
-    }
-
-    try {
-      const { email, token } = req.body;
-
-      let decoded;
-      try {
-        decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
-      } catch (error) {
-        logger.warn(`Invalid verification token in form: ${error.message}`);
-        return res.status(400).json({ message: 'Invalid or expired token' });
-      }
-
-      if (decoded.email !== email) {
-        logger.warn(`Email ${email} does not match token`);
-        return res.status(400).json({ message: 'Token does not match provided email' });
-      }
-
-      const user = await User.findOne({ where: { email } });
-      if (!user) {
-        logger.warn(`User with email ${email} not found`);
-        return res.status(400).json({ message: 'User not found' });
-      }
-
-      if (user.verificationToken !== token) {
-        logger.warn(`Verification token mismatch for email ${email}`);
-        return res.status(400).json({ message: 'Invalid token' });
-      }
-
-      if (user.isVerified) {
-        return res.status(200).json({ message: 'Email already verified' });
-      }
-
-      user.isVerified = true;
-      user.verificationToken = null;
-      await user.save();
-
-      try {
-        await sendTelegramMessage(user.telegramId, `✅ Your email (${user.email}) is verified! Welcome to PlayEvit!`);
-      } catch (telegramError) {
-        logger.warn(`Failed to send verification message to Telegram for ${user.email}: ${telegramError.message}`);
-      }
-
-      logger.info(`Email verified via form for ${user.email}`);
-      res.status(200).json({ message: 'Email verified successfully!' });
-    } catch (error) {
-      logger.error(`Form verification error: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
-    }
-  }
-);
-
-// User login
+// Вход пользователя
 app.post(
   '/api/auth/login',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('password').notEmpty().withMessage('Password is required'),
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('password').notEmpty().withMessage('Требуется пароль'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const { email, password } = req.body;
-
       const user = await User.findOne({ where: { email } });
       if (!user) {
-        logger.warn(`Login attempt with non-existent email: ${email}`);
-        return res.status(400).json({ message: 'Invalid email or password' });
+        logger.warn(`Попытка входа с несуществующим email: ${email}`);
+        return res.status(400).json({ message: 'Недействительный email или пароль' });
       }
 
       const isMatch = await bcrypt.compare(password, user.password);
       if (!isMatch) {
-        logger.warn(`Incorrect password for email: ${email}`);
-        return res.status(400).json({ message: 'Invalid email or password' });
+        logger.warn(`Неверный пароль для email: ${email}`);
+        return res.status(400).json({ message: 'Недействительный email или пароль' });
       }
 
       let token = user.jwtToken;
       if (!token) {
-        token = jwt.sign(
-          { id: user.id, email: user.email },
-          process.env.JWT_SECRET || 'your_jwt_secret',
-          { expiresIn: '7d' }
-        );
+        token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
         user.jwtToken = token;
         await user.save();
       }
 
-      try {
-        await sendTelegramMessage(user.telegramId, `🔐 You logged into PlayEvit with email: ${user.email}`);
-      } catch (telegramError) {
-        logger.warn(`Failed to send login message to Telegram for ${user.email}: ${telegramError.message}`);
-      }
-
-      logger.info(`User logged in: ${user.email}`);
+      logger.info(`Пользователь вошёл: ${user.email}`);
       res.status(200).json({
         token,
         user: {
@@ -712,87 +514,73 @@ app.post(
           email: user.email,
           accountType: user.accountType,
           name: user.name,
-          telegramId: user.telegramId,
+          phone: user.phone,
         },
-        message: 'Login successful',
+        message: 'Вход успешен',
       });
     } catch (error) {
-      logger.error(`Login error: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка входа: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Password reset request
+// Запрос сброса пароля
 app.post(
   '/api/auth/forgot-password',
-  [body('email').isEmail().normalizeEmail().withMessage('Valid email is required')],
+  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const { email } = req.body;
       const user = await User.findOne({ where: { email } });
       if (!user) {
-        logger.warn(`Password reset attempt for non-existent email: ${email}`);
-        return res.status(404).json({ message: 'User with this email not found' });
+        logger.warn(`Попытка сброса пароля для несуществующего email: ${email}`);
+        return res.status(404).json({ message: 'Пользователь с этим email не найден' });
       }
 
-      const resetToken = jwt.sign(
-        { email },
-        process.env.JWT_SECRET || 'your_jwt_secret',
-        { expiresIn: '1h' }
-      );
+      const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
       user.resetPasswordToken = resetToken;
       user.resetPasswordExpires = new Date(Date.now() + 3600000);
       await user.save();
 
-      try {
-        await sendPasswordResetTelegram(user.telegramId, resetToken);
-        logger.info(`Password reset requested for ${user.email}`);
-        res.status(200).json({ message: 'Password reset link sent to Telegram' });
-      } catch (telegramError) {
-        logger.warn(`Password reset message not sent to Telegram for ${user.email}: ${telegramError.message}`);
-        res.status(200).json({
-          message: 'Password reset link not sent to Telegram. Ensure you sent /start to the bot.',
-          email,
-        });
-      }
+      logger.info(`Запрос сброса пароля для ${user.email}`);
+      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку по email)' });
     } catch (error) {
-      logger.error(`Password reset request error: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка запроса сброса пароля: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Password reset
+// Сброс пароля
 app.post(
   '/api/auth/reset-password/:token',
   [
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Passwords do not match'),
+    body('password').isLength({ min: 8 }).withMessage('Пароль должен быть минимум 8 символов'),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Пароли не совпадают'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const { token } = req.params;
       const { password } = req.body;
-
       let decoded;
       try {
-        decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+        decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
-        logger.warn(`Invalid reset token: ${error.message}`);
-        return res.status(400).json({ message: 'Invalid or expired token' });
+        logger.warn(`Недействительный токен сброса: ${error.message}`);
+        return res.status(400).json({ message: 'Недействительный или истёкший токен' });
       }
 
       const user = await User.findOne({
@@ -803,8 +591,8 @@ app.post(
         },
       });
       if (!user) {
-        logger.warn(`Invalid or expired reset token for email: ${decoded.email}`);
-        return res.status(400).json({ message: 'Invalid token or expired' });
+        logger.warn(`Недействительный или истёкший токен сброса для email: ${decoded.email}`);
+        return res.status(400).json({ message: 'Недействительный токен или истёк' });
       }
 
       const salt = await bcrypt.genSalt(10);
@@ -814,39 +602,33 @@ app.post(
       user.jwtToken = null;
       await user.save();
 
-      try {
-        await sendTelegramMessage(user.telegramId, `🔑 Your password was reset for email: ${user.email}`);
-      } catch (telegramError) {
-        logger.warn(`Failed to send password reset message to Telegram for ${user.email}: ${telegramError.message}`);
-      }
-
-      logger.info(`Password reset for ${user.email}`);
-      res.status(200).json({ message: 'Password reset successfully' });
+      logger.info(`Пароль сброшен для ${user.email}`);
+      res.status(200).json({ message: 'Пароль успешно сброшен' });
     } catch (error) {
-      logger.error(`Password reset error: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка сброса пароля: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Get user profile
+// Получение профиля пользователя
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
-      attributes: { exclude: ['password', 'verificationToken', 'resetPasswordToken', 'resetPasswordExpires', 'jwtToken'] },
+      attributes: { exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'jwtToken'] },
     });
     if (!user) {
-      logger.warn(`User not found for ID: ${req.user.id}`);
-      return res.status(404).json({ message: 'User not found' });
+      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'Пользователь не найден' });
     }
     res.status(200).json(user);
   } catch (error) {
-    logger.error(`Error fetching profile: ${error.message}`);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    logger.error(`Ошибка получения профиля: ${error.message}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
   }
 });
 
-// Update documents
+// Обновление документов
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -855,120 +637,126 @@ app.post(
     try {
       const user = await User.findByPk(req.user.id);
       if (!user) {
-        logger.warn(`User not found for ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'User not found' });
+        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'Пользователь не найден' });
       }
 
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('No documents uploaded');
-        return res.status(400).json({ message: 'At least one document is required' });
+        logger.warn('Документы не загружены');
+        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
-      const newDocuments = req.files.documents.map(file => file.path);
+      const newDocuments = await Promise.all(
+        req.files.documents.map(file => uploadToS3(file, 'documents'))
+      );
+
       user.documents = [...user.documents, ...newDocuments].slice(0, 3);
-      user.isVerified = true; // Auto-verify after document upload
+      user.isVerified = true;
       await user.save();
 
-      try {
-        await sendTelegramMessage(user.telegramId, `📄 Your documents were updated for email: ${user.email}`);
-      } catch (telegramError) {
-        logger.warn(`Failed to send document update message to Telegram for ${user.email}: ${telegramError.message}`);
-      }
-
-      logger.info(`Documents updated for user ${user.email}`);
-      res.status(200).json({ message: 'Documents updated successfully', documents: user.documents });
+      logger.info(`Документы обновлены для пользователя ${user.email}`);
+      res.status(200).json({ message: 'Документы успешно обновлены', documents: user.documents });
     } catch (error) {
-      logger.error(`Error updating documents: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка обновления документов: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Create new app
+// Создание нового приложения
 app.post(
   '/api/apps/create',
   authenticateToken,
   upload,
   [
-    body('name').notEmpty().trim().withMessage('App name is required'),
-    body('description').notEmpty().trim().withMessage('Description is required'),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category; must be one of: games, productivity, education, entertainment'),
+    body('name').notEmpty().trim().withMessage('Требуется название приложения'),
+    body('description').notEmpty().trim().withMessage('Требуется описание'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Недопустимая категория'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const user = await User.findByPk(req.user.id);
       if (!user) {
-        logger.warn(`User not found for ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'User not found' });
+        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'Пользователь не найден' });
       }
 
       if (!user.isVerified) {
-        logger.warn(`User not verified: ${user.email}`);
-        return res.status(403).json({ message: 'Account must be verified to submit apps' });
+        logger.warn(`Пользователь не верифицирован: ${user.email}`);
+        return res.status(403).json({ message: 'Аккаунт должен быть верифицирован для отправки приложений' });
       }
 
       const { name, description, category } = req.body;
       const files = req.files;
 
       if (!files || !files.icon || !files.icon[0]) {
-        logger.warn('Icon file missing');
-        return res.status(400).json({ message: 'Icon file (JPG, JPEG, or PNG) is required' });
+        logger.warn('Файл иконки отсутствует');
+        return res.status(400).json({ message: 'Требуется файл иконки (JPG, JPEG или PNG)' });
       }
       if (!files.apk || !files.apk[0]) {
-        logger.warn('APK file missing');
-        return res.status(400).json({ message: 'APK file is required' });
+        logger.warn('Файл APK отсутствует');
+        return res.status(400).json({ message: 'Требуется файл APK' });
       }
+
+      const iconUrl = await uploadToS3(files.icon[0], 'icons');
+      const apkUrl = await uploadToS3(files.apk[0], 'apks');
 
       const app = await App.create({
         name,
         description,
         category,
-        iconPath: files.icon[0].path,
-        apkPath: files.apk[0].path,
+        iconPath: iconUrl,
+        apkPath: apkUrl,
         userId: user.id,
         status: 'pending',
       });
 
-      try {
-        await sendTelegramMessage(
-          user.telegramId,
-          `🚀 Your app "${name}" has been submitted for review! We'll notify you once it's processed.`
-        );
-      } catch (telegramError) {
-        logger.warn(`Failed to send app submission message to Telegram for ${user.email}: ${telegramError.message}`);
-      }
-
-      logger.info(`App created by ${user.email}: ${name}`);
-      res.status(201).json({ message: 'App submitted successfully', app });
+      logger.info(`Приложение создано пользователем ${user.email}: ${name}`);
+      res.status(201).json({ message: 'Приложение успешно отправлено', app });
     } catch (error) {
-      logger.error(`Error creating app: ${error.message}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка создания приложения: ${error.message}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Error handling middleware
+// Обработка ошибок
 app.use((err, req, res, next) => {
-  logger.error(`Unhandled error: ${err.message}`);
+  logger.error(`Необработанная ошибка: ${err.message}`);
   if (err instanceof multer.MulterError) {
-    logger.warn(`Multer error: ${err.message}`);
-    return res.status(400).json({ message: `File upload error: ${err.message}` });
+    logger.warn(`Ошибка Multer: ${err.message}`);
+    return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
   }
-  if (err.message.includes('Only')) {
-    logger.warn(`File type error: ${err.message}`);
+  if (err.message.includes('Разрешены только')) {
+    logger.warn(`Ошибка типа файла: ${err.message}`);
     return res.status(400).json({ message: err.message });
   }
-  res.status(500).json({ message: 'Server error', error: err.message });
+  res.status(500).json({ message: 'Ошибка сервера', error: err.message });
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  logger.info(`Server running on port ${PORT}`);
-});
+// Graceful shutdown
+async function shutdown() {
+  logger.info('Выполняется graceful shutdown...');
+  await sequelize.close();
+  logger.info('Соединение с базой данных закрыто');
+  process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// Запуск сервера
+async function startServer() {
+  await initializeApp();
+  app.listen(PORT, () => {
+    logger.info(`Сервер запущен на порту ${PORT}`);
+  });
+}
+
+startServer();
