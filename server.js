@@ -1,6 +1,6 @@
 const express = require('express');
 const { Sequelize, DataTypes } = require('sequelize');
-const mysql2 = require('mysql2');
+const mysql = require('mysql'); // Замена mysql2 на mysql
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const TelegramBot = require('node-telegram-bot-api');
@@ -66,10 +66,10 @@ const sequelize = new Sequelize({
   password: 'Vasya11091109',
   database: 'ch79145_project',
   port: 3306,
-  dialectModule: mysql2,
+  dialectModule: mysql, // Используем mysql вместо mysql2
   logging: (msg) => logger.debug(msg),
   pool: {
-    max: 5,
+    max: 2, // Уменьшено до 2 для снижения нагрузки
     min: 0,
     acquire: 30000,
     idle: 10000,
@@ -77,7 +77,7 @@ const sequelize = new Sequelize({
 });
 
 // Connection retry mechanism
-async function connectWithRetry(maxRetries = 5, retryDelay = 10000) {
+async function connectWithRetry(maxRetries = 5, retryDelay = 20000) { // Интервал увеличен до 20 секунд
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       await sequelize.authenticate();
@@ -308,6 +308,15 @@ try {
     },
   });
   logger.info('Telegram bot initialized');
+
+  // Handle polling errors
+  bot.on('polling_error', (error) => {
+    logger.error(`Telegram polling error: ${error.message}`);
+    if (error.message.includes('409 Conflict')) {
+      logger.error('Conflict detected: Another bot instance is running. Stopping polling.');
+      bot.stopPolling();
+    }
+  });
 } catch (error) {
   logger.error(`Failed to initialize Telegram bot: ${error.message}`);
 }
