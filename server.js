@@ -15,16 +15,16 @@ const app = express();
 
 // Конфигурация переменных окружения (без dotenv)
 const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3'; // Сгенерированный безопасный ключ
-const DB_HOST = 'vh438.timeweb.ru'; // Замени на хост MySQL (например, 'localhost' или IP)
-const DB_USER = 'ch79145_project'; // Замени на пользователя MySQL
-const DB_PASSWORD = 'Vasya11091109'; // Замени на пароль MySQL
-const DB_NAME = 'ch79145_project'; // Замени на имя базы данных
-const S3_ACCESS_KEY = 'DN1NLZTORA2L6NZ529JJ'; // Замени на ключ доступа S3
-const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8'; // Замени на секретный ключ S3
-const CORS_ORIGIN = 'https://24webstudio.ru'; // Замени на домен фронтенда
-const PORT = 5000; // Порт по умолчанию
-const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75'; // Замени на имя S3 бакета
-const DB_SSL = 'false'; // Укажи 'true', если требуется SSL для MySQL
+const DB_HOST = 'vh438.timeweb.ru';
+const DB_USER = 'ch79145_project';
+const DB_PASSWORD = 'Vasya11091109';
+const DB_NAME = 'ch79145_project';
+const S3_ACCESS_KEY = 'DN1NLZTORA2L6NZ529JJ';
+const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
+const CORS_ORIGIN = 'https://24webstudio.ru';
+const PORT = 5000;
+const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+const DB_SSL = 'false';
 
 // Проверка обязательных переменных
 const requiredEnvVars = [
@@ -37,7 +37,7 @@ const requiredEnvVars = [
   'S3_SECRET_KEY',
 ];
 for (const envVar of requiredEnvVars) {
-  const value = eval(envVar); // Получаем значение константы
+  const value = eval(envVar);
   if (!value || value === `YOUR_${envVar}`) {
     console.error(`Ошибка: Переменная ${envVar} не задана или имеет значение по умолчанию`);
     process.exit(1);
