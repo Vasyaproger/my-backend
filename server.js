@@ -22,10 +22,9 @@ const DB_PASSWORD = 'Vasya11091109';
 const DB_NAME = 'ch79145_project';
 const S3_ACCESS_KEY = 'DN1NLZTORA2L6NZ529JJ';
 const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
-const CORS_ORIGIN = 'https://24webstudio.ru';
 const PORT = 5000;
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''; // Опционально: задайте в переменных окружения
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // Проверка обязательных переменных
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'];
@@ -76,7 +75,7 @@ async function checkS3Connection() {
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: CORS_ORIGIN,
+  origin: '*', // Разрешить всем доменам
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Authorization'],
@@ -97,7 +96,7 @@ const db = mysql.createPool({
 // Конфигурация Multer
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // Лимит 10 МБ
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.fieldname === 'documents') {
       const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
@@ -217,11 +216,11 @@ const authenticateToken = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     if (!decoded.id || !decoded.email) {
-      logger.warn(`Токен не содержит id или email: ${token}`);
+      logger.warn(`Токен не содержит id или email: ${JSON.stringify(decoded)}`);
       return res.status(403).json({ message: 'Недействительный токен: отсутствуют необходимые данные' });
     }
     req.user = decoded;
-    logger.info(`Токен успешно проверен для пользователя: ${decoded.email}, маршрут: ${req.originalUrl}`);
+    logger.info(`Токен проверен: id=${decoded.id}, email=${decoded.email}, маршрут: ${req.originalUrl}`);
     next();
   } catch (error) {
     logger.error(`Недействительный токен для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
@@ -338,8 +337,6 @@ async function initializeServer() {
   }
 }
 
-// Маршруты
-
 // Публичные маршруты
 app.get('/api/public/apps', async (req, res) => {
   try {
@@ -391,13 +388,12 @@ app.post(
       await db.query('INSERT INTO PreRegisters (email) VALUES (?)', [email]);
       logger.info(`Предрегистрация: ${email}`);
 
-      // Опционально: отправка уведомления в Telegram
       if (TELEGRAM_BOT_TOKEN) {
         try {
           await axios.post(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
             {
-              chat_id: '-1002311447135', // Замените на ваш chat ID
+              chat_id: '-1002311447135',
               text: `Новая предрегистрация: ${email}`,
               parse_mode: 'Markdown',
             }
@@ -550,7 +546,6 @@ app.post(
       );
 
       logger.info(`Запрошен сброс пароля для ${user[0].email}`);
-      // Опционально: добавьте логику отправки email
       res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку email)' });
     } catch (error) {
       logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
@@ -715,13 +710,12 @@ app.post(
 
       logger.info(`Приложение создано пользователем ${user[0].email}: ${name}`);
 
-      // Опционально: отправка уведомления в Telegram
       if (TELEGRAM_BOT_TOKEN) {
         try {
           await axios.post(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
             {
-              chat_id: '-1002311447135', // Замените на ваш chat ID
+              chat_id: '-1002311447135',
               text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
               parse_mode: 'Markdown',
             }
@@ -786,14 +780,13 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     await db.query('UPDATE Apps SET status = ? WHERE id = ?', [status, id]);
     logger.info(`Статус приложения ${id} обновлен на ${status}`);
 
-    // Опционально: уведомление пользователя через Telegram
     if (status !== 'pending' && TELEGRAM_BOT_TOKEN) {
       const [appUser] = await db.query('SELECT email FROM Users WHERE id = ?', [app[0].userId]);
       try {
         await axios.post(
           `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
           {
-            chat_id: '-1002311447135', // Замените на ваш chat ID
+            chat_id: '-1002311447135',
             text: `Статус приложения ${app[0].name} обновлен на ${status} для пользователя ${appUser[0].email}`,
             parse_mode: 'Markdown',
           }
