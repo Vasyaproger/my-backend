@@ -56,25 +56,41 @@ app.use(helmet());
 app.use(cors({ origin: '*' })); // Разрешаем CORS для всех доменов
 app.use(express.json());
 
-// Подключение к базе данных MySQL с жестко заданными значениями
+// Подключение к базе данных MySQL с механизмом повторных попыток
 const sequelize = new Sequelize({
   dialect: 'mysql',
   host: 'vh438.timeweb.ru',
-  username: 'ch79145_myprojec',
+  username: 'ch79145_project',
   password: 'Vasya11091109',
-  database: 'ch79145_myprojec',
+  database: 'ch79145_project',
   port: 3306,
   dialectModule: mysql2,
   logging: (msg) => logger.debug(msg),
 });
 
-// Проверка подключения к базе данных (без завершения процесса)
-sequelize.authenticate()
-  .then(() => logger.info('Подключение к базе данных успешно'))
-  .catch((error) => {
-    logger.error(`Ошибка подключения к базе данных: ${error.message}`);
-  });
+// Функция для попыток подключения с повтором
+async function connectWithRetry(maxRetries = 5, retryDelay = 5000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await sequelize.authenticate();
+      logger.info('Подключение к базе данных успешно');
+      return;
+    } catch (error) {
+      logger.error(`Попытка ${attempt} подключения к базе данных не удалась: ${error.message}`);
+      if (attempt === maxRetries) {
+        logger.error('Не удалось подключиться к базе данных после всех попыток');
+        throw new Error('Не удалось подключиться к базе данных');
+      }
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+  }
+}
 
+// Вызов подключения
+connectWithRetry().catch(err => {
+  logger.error(`Критическая ошибка: ${err.message}`);
+  process.exit(1); // Останавливаем сервер, если база недоступна
+});
 // Модель пользователя
 const User = sequelize.define('User', {
   email: {
