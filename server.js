@@ -6,6 +6,8 @@ const multer = require('multer');
 const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
+const compression = require('compression'); // Added for response compression
+const rateLimit = require('express-rate-limit'); // Added for rate limiting
 const { body, validationResult } = require('express-validator');
 const winston = require('winston');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
@@ -16,7 +18,7 @@ const Queue = require('bull');
 
 const app = express();
 
-// Конфигурация
+// Configuration
 require('dotenv').config();
 const JWT_SECRET = process.env.JWT_SECRET || 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
 const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
@@ -29,17 +31,18 @@ const PORT = process.env.PORT || 5000;
 const BUCKET_NAME = process.env.BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '7597915834:AAFzMDAKOc5UgcuAXWYdXy4V0Hj4qXL0KeY';
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const WEBSITE_URL = process.env.WEBSITE_URL || 'https://your-app-domain.com'; // Added website URL
 
-// Проверка переменных окружения
+// Validate environment variables
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME', 'TELEGRAM_BOT_TOKEN'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
-    console.error(`Ошибка: ${envVar} не установлен в переменных окружения`);
+    console.error(`Error: ${envVar} is not set in environment variables`);
     process.exit(1);
   }
 }
 
-// Настройка логгера
+// Logger setup
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -53,7 +56,7 @@ const logger = winston.createLogger({
   ],
 });
 
-// Настройка S3 клиента
+// S3 Client setup
 const s3Client = new S3Client({
   endpoint: 'https://s3.twcstorage.ru',
   credentials: {
@@ -64,19 +67,20 @@ const s3Client = new S3Client({
   forcePathStyle: true,
 });
 
-// Проверка соединения с S3
+// Check S3 connection
 async function checkS3Connection() {
   try {
     await s3Client.send(new ListBucketsCommand({}));
-    logger.info('Соединение с S3 успешно');
+    logger.info('S3 connection successful');
   } catch (err) {
-    logger.error(`Ошибка соединения с S3: ${err.message}, стек: ${err.stack}`);
+    logger.error(`S3 connection error: ${err.message}, stack: ${err.stack}`);
     throw err;
   }
 }
 
 // Middleware
 app.use(helmet());
+app.use(compression()); // Enable response compression
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -85,18 +89,37 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Пул соединений с MySQL
+// Request timeout middleware
+app.use((req, res, next) => {
+  res.setTimeout(60000, () => { // 60 seconds timeout
+    logger.warn(`Request timeout for ${req.originalUrl}`);
+    res.status(408).json({ message: 'Request timeout' });
+  });
+  next();
+});
+
+// Rate limiting for sensitive endpoints
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per window
+  message: 'Too many requests, please try again later.',
+});
+app.use('/api/auth', apiLimiter);
+app.use('/api/user', apiLimiter);
+app.use('/api/apps', apiLimiter);
+
+// MySQL connection pool
 const db = mysql.createPool({
   host: DB_HOST,
   user: DB_USER,
   password: DB_PASSWORD,
   database: DB_NAME,
   port: 3306,
-  connectionLimit: 10,
-  connectTimeout: 10000, // Уменьшен таймаут подключения
+  connectionLimit: 20, // Increased connection limit
+  connectTimeout: 10000,
 });
 
-// Настройка Multer с улучшенной обработкой ошибок
+// Multer setup with improved error handling
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -108,8 +131,8 @@ const upload = multer({
         const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
         const mimetype = validMimeTypes.includes(file.mimetype);
         if (extname && mimetype) return cb(null, true);
-        logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
-        cb(new Error('Разрешены только файлы PNG для иконок!'));
+        logger.warn(`Invalid icon: name=${file.originalname}, MIME=${file.mimetype}`);
+        cb(new Error('Only PNG files are allowed for icons!'));
       } else if (file.fieldname === 'apk') {
         const extname = file.originalname.toLowerCase().endsWith('.apk');
         const validMimeTypes = [
@@ -120,22 +143,22 @@ const upload = multer({
         ];
         const mimetype = validMimeTypes.includes(file.mimetype);
         if (extname && mimetype) return cb(null, true);
-        logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
-        cb(new Error('Разрешены только файлы APK!'));
+        logger.warn(`Invalid APK: name=${file.originalname}, MIME=${file.mimetype}`);
+        cb(new Error('Only APK files are allowed!'));
       } else if (file.fieldname === 'documents') {
         const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
         const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
         const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
         const mimetype = validMimeTypes.includes(file.mimetype);
         if (extname && mimetype) return cb(null, true);
-        logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
-        cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
+        logger.warn(`Invalid document: name=${file.originalname}, MIME=${file.mimetype}`);
+        cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed for documents!'));
       } else {
-        logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
-        cb(new Error('Недопустимое имя поля!'));
+        logger.warn(`Invalid field name: ${file.fieldname}`);
+        cb(new Error('Invalid field name!'));
       }
     } catch (err) {
-      logger.error(`Ошибка в фильтре Multer: ${err.message}`);
+      logger.error(`Multer filter error: ${err.message}`);
       cb(err);
     }
   },
@@ -145,7 +168,7 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// Функции для работы с S3
+// S3 functions
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
@@ -159,19 +182,18 @@ async function uploadToS3(file, folder) {
   };
 
   try {
-    // Добавлен таймаут для S3
     const upload = new Upload({
       client: s3Client,
       params,
-      timeout: 30000, // 30 секунд таймаута
+      timeout: 30000,
     });
     const result = await upload.done();
     const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
-    logger.info(`Файл загружен в S3: ${key}, URL: ${location}`);
+    logger.info(`File uploaded to S3: ${key}, URL: ${location}`);
     return location;
   } catch (error) {
-    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}, стек: ${error.stack}`);
-    throw new Error(`Ошибка загрузки в S3: ${error.message}`);
+    logger.error(`S3 upload error for ${key}: ${error.message}, stack: ${error.stack}`);
+    throw new Error(`S3 upload error: ${error.message}`);
   }
 }
 
@@ -179,9 +201,9 @@ async function deleteFromS3(key) {
   const params = { Bucket: BUCKET_NAME, Key: key };
   try {
     await s3Client.send(new DeleteObjectCommand(params));
-    logger.info(`Файл удален из S3: ${key}`);
+    logger.info(`File deleted from S3: ${key}`);
   } catch (err) {
-    logger.error(`Ошибка удаления из S3: ${err.message}, стек: ${err.stack}`);
+    logger.error(`S3 delete error: ${err.message}, stack: ${err.stack}`);
     throw err;
   }
 }
@@ -193,35 +215,35 @@ async function getFromS3(key) {
     const data = await s3Client.send(command);
     return data;
   } catch (err) {
-    logger.error(`Ошибка получения из S3: ${err.message}, стек: ${err.stack}`);
+    logger.error(`S3 get error: ${err.message}, stack: ${err.stack}`);
     throw err;
   }
 }
 
-// Middleware для проверки JWT
+// JWT authentication middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
-    logger.warn(`Отсутствует токен авторизации для маршрута: ${req.originalUrl}`);
-    return res.status(401).json({ message: 'Требуется токен авторизации' });
+    logger.warn(`No authorization token for route: ${req.originalUrl}`);
+    return res.status(401).json({ message: 'Authorization token required' });
   }
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     if (!decoded.id || !decoded.email) {
-      logger.warn(`Токен не содержит id или email: ${JSON.stringify(decoded)}`);
-      return res.status(403).json({ message: 'Недействительный токен: отсутствуют необходимые данные' });
+      logger.warn(`Token missing id or email: ${JSON.stringify(decoded)}`);
+      return res.status(403).json({ message: 'Invalid token: missing required data' });
     }
     req.user = decoded;
-    logger.info(`Токен проверен: id=${decoded.id}, email=${decoded.email}, маршрут: ${req.originalUrl}`);
+    logger.info(`Token verified: id=${decoded.id}, email=${decoded.email}, route: ${req.originalUrl}`);
     next();
   } catch (error) {
-    logger.error(`Ошибка проверки токена для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
-    return res.status(403).json({ message: 'Недействительный или истекший токен', error: error.message });
+    logger.error(`Token verification error for route ${req.originalUrl}: ${error.message}, stack: ${error.stack}`);
+    return res.status(403).json({ message: 'Invalid or expired token', error: error.message });
   }
 };
 
-// Middleware для опциональной аутентификации
+// Optional authentication middleware
 const optionalAuthenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -235,34 +257,34 @@ const optionalAuthenticateToken = (req, res, next) => {
   }
 };
 
-// Настройка очереди для Telegram-уведомлений
+// Telegram queue setup
 const telegramQueue = new Queue('telegram-notifications', REDIS_URL, {
-  limiter: { max: 30, duration: 1000 }, // Ограничение: 30 сообщений в секунду
+  limiter: { max: 30, duration: 1000 },
 });
 
-// Обработка задач в очереди
-telegramQueue.process(async (job) => {
+// Process Telegram queue with improved error handling
+telegramQueue.process(async (job, done) => {
   const { chatId, text } = job.data;
   try {
     await axios.post(
       `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
       { chat_id: chatId, text, parse_mode: 'Markdown' },
-      { timeout: 10000 } // Добавлен таймаут для Telegram API
+      { timeout: 10000 }
     );
-    logger.info(`Уведомление отправлено на Telegram ${chatId}: ${text}`);
+    logger.info(`Notification sent to Telegram ${chatId}: ${text}`);
+    done();
   } catch (err) {
-    logger.error(`Ошибка отправки уведомления на Telegram ${chatId}: ${err.message}`);
-    throw err;
+    logger.error(`Telegram notification error ${chatId}: ${err.message}`);
+    done(err);
   }
 });
 
-// Инициализация базы данных
+// Database initialization
 async function initializeDatabase() {
   try {
     const connection = await db.getConnection();
-    logger.info('Подключение к MySQL выполнено');
+    logger.info('MySQL connection established');
 
-    // Создание таблицы Users
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -288,29 +310,27 @@ async function initializeDatabase() {
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-    logger.info('Таблица Users проверена/создана');
+    logger.info('Users table checked/created');
 
-    // Проверка и добавление недостающих столбцов
     const [columns] = await connection.query(`SHOW COLUMNS FROM Users`);
     const columnNames = columns.map(col => col.Field);
     if (!columnNames.includes('telegramId')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN telegramId VARCHAR(255) UNIQUE`);
-      logger.info('Столбец telegramId добавлен');
+      logger.info('telegramId column added');
     }
     if (!columnNames.includes('verificationToken')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN verificationToken VARCHAR(500)`);
-      logger.info('Столбец verificationToken добавлен');
+      logger.info('verificationToken column added');
     }
     if (!columnNames.includes('verificationExpires')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN verificationExpires DATETIME`);
-      logger.info('Столбец verificationExpires добавлен');
+      logger.info('verificationExpires column added');
     }
     if (!columnNames.includes('isBlocked')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN isBlocked BOOLEAN DEFAULT FALSE`);
-      logger.info('Столбец isBlocked добавлен');
+      logger.info('isBlocked column added');
     }
 
-    // Создание таблицы PreRegisters
     await connection.query(`
       CREATE TABLE IF NOT EXISTS PreRegisters (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -319,9 +339,8 @@ async function initializeDatabase() {
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-    logger.info('Таблица PreRegisters проверена/создана');
+    logger.info('PreRegisters table checked/created');
 
-    // Создание таблицы Apps
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Apps (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -337,9 +356,8 @@ async function initializeDatabase() {
         FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
       )
     `);
-    logger.info('Таблица Apps проверена/создана');
+    logger.info('Apps table checked/created');
 
-    // Создание таблицы Advertisements
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Advertisements (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -353,9 +371,8 @@ async function initializeDatabase() {
         FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
       )
     `);
-    logger.info('Таблица Advertisements проверена/создана');
+    logger.info('Advertisements table checked/created');
 
-    // Создание администратора по умолчанию
     const [users] = await connection.query("SELECT * FROM Users WHERE email = ?", ['admin@24webstudio.ru']);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash('admin123', 10);
@@ -363,85 +380,83 @@ async function initializeDatabase() {
         "INSERT INTO Users (email, password, accountType, name, phone, isVerified) VALUES (?, ?, ?, ?, ?, ?)",
         ['admin@24webstudio.ru', hashedPassword, 'commercial', 'Admin', '1234567890', true]
       );
-      logger.info('Админ создан: admin@24webstudio.ru / admin123');
+      logger.info('Admin created: admin@24webstudio.ru / admin123');
     } else {
-      logger.info('Админ уже существует: admin@24webstudio.ru');
+      logger.info('Admin already exists: admin@24webstudio.ru');
     }
 
     connection.release();
   } catch (err) {
-    logger.error(`Ошибка инициализации базы данных: ${err.message}, стек: ${err.stack}`);
+    logger.error(`Database initialization error: ${err.message}, stack: ${err.stack}`);
     throw err;
   }
 }
 
-// Инициализация Telegram-бота
+// Telegram bot initialization
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-// Обработка команды /start
+// Telegram bot commands
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  logger.info(`Получена команда /start от Telegram ID: ${chatId}`);
+  logger.info(`Received /start command from Telegram ID: ${chatId}`);
 
   try {
     const [user] = await db.query('SELECT email, isVerified FROM Users WHERE telegramId = ?', [chatId]);
     if (user.length > 0) {
       if (user[0].isVerified) {
-        bot.sendMessage(chatId, 'Ваш аккаунт уже верифицирован.');
+        bot.sendMessage(chatId, 'Ваш аккаунт уже верифицирован.\n\nПосетите наш сайт: [Перейти](' + WEBSITE_URL + ')', { parse_mode: 'Markdown' });
       } else {
-        bot.sendMessage(chatId, `Ваш аккаунт связан с email: ${user[0].email}. Ожидайте проверки документов администратором.`);
+        bot.sendMessage(chatId, `Ваш аккаунт связан с email: ${user[0].email}. Ожидайте проверки документов администратором.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
       }
     } else {
-      bot.sendMessage(chatId, 'Пожалуйста, введите email, который вы использовали при регистрации:');
+      bot.sendMessage(chatId, `Пожалуйста, введите email, который вы использовали при регистрации.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
       bot.once('message', async (msg) => {
         const email = msg.text.trim();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-          bot.sendMessage(chatId, 'Недействительный email. Попробуйте снова с командой /start.');
+          bot.sendMessage(chatId, `Недействительный email. Попробуйте снова с командой /start.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
           return;
         }
 
         const [existingUser] = await db.query('SELECT id, isVerified FROM Users WHERE email = ?', [email]);
         if (!existingUser.length) {
-          bot.sendMessage(chatId, 'Email не найден. Пожалуйста, зарегистрируйтесь на сайте.');
+          bot.sendMessage(chatId, `Email не найден. Пожалуйста, зарегистрируйтесь на сайте: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
           return;
         }
 
         if (existingUser[0].isVerified) {
-          bot.sendMessage(chatId, 'Ваш аккаунт уже верифицирован.');
+          bot.sendMessage(chatId, `Ваш аккаунт уже верифицирован.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
           return;
         }
 
         await db.query('UPDATE Users SET telegramId = ? WHERE email = ?', [chatId, email]);
-        bot.sendMessage(chatId, 'Ваш email успешно связан. Ожидайте проверки документов администратором.');
-        logger.info(`Telegram ID ${chatId} связан с email: ${email}`);
+        bot.sendMessage(chatId, `Ваш email успешно связан. Ожидайте проверки документов администратором.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
+        logger.info(`Telegram ID ${chatId} linked to email: ${email}`);
       });
     }
   } catch (err) {
-    logger.error(`Ошибка обработки /start: ${err.message}`);
-    bot.sendMessage(chatId, 'Произошла ошибка. Попробуйте позже.');
+    logger.error(`Error processing /start: ${err.message}`);
+    bot.sendMessage(chatId, `Произошла ошибка. Попробуйте позже.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
   }
 });
 
-// Обработка команды /status
 bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
-  logger.info(`Получена команда /status от Telegram ID: ${chatId}`);
+  logger.info(`Received /status command from Telegram ID: ${chatId}`);
 
   try {
     const [user] = await db.query('SELECT email, isVerified, isBlocked FROM Users WHERE telegramId = ?', [chatId]);
     if (!user.length) {
-      bot.sendMessage(chatId, 'Ваш Telegram ID не связан с аккаунтом. Используйте команду /start и укажите email.');
+      bot.sendMessage(chatId, `Ваш Telegram ID не связан с аккаунтом. Используйте команду /start и укажите email.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
       return;
     }
 
     if (user[0].isBlocked) {
-      bot.sendMessage(chatId, 'Ваш аккаунт заблокирован. Свяжитесь с администратором.');
+      bot.sendMessage(chatId, `Ваш аккаунт заблокирован. Свяжитесь с администратором.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
       return;
     }
 
     const [apps] = await db.query('SELECT name, status FROM Apps WHERE userId = (SELECT id FROM Users WHERE telegramId = ?)', [chatId]);
-    let response = `Статус аккаунта (${user[0].email}): ${user[0].isVerified ? 'Верифицирован' : 'Ожидает верификации'}\n\n`;
-    response += 'Ваши приложения:\n';
+    let response = `*Статус аккаунта* (${user[0].email}): ${user[0].isVerified ? 'Верифицирован' : 'Ожидает верификации'}\n\n*Ваши приложения*:\n`;
     if (apps.length === 0) {
       response += 'У вас нет приложений.';
     } else {
@@ -449,36 +464,41 @@ bot.onText(/\/status/, async (msg) => {
         response += `- ${app.name}: ${app.status}\n`;
       });
     }
-
-    bot.sendMessage(chatId, response);
+    response += `\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`;
+    bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
   } catch (err) {
-    logger.error(`Ошибка обработки /status: ${err.message}`);
-    bot.sendMessage(chatId, 'Произошла ошибка. Попробуйте позже.');
+    logger.error(`Error processing /status: ${err.message}`);
+    bot.sendMessage(chatId, `Произошла ошибка. Попробуйте позже.\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
   }
 });
 
-// Обработка команды /help
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
-  logger.info(`Получена команда /help от Telegram ID: ${chatId}`);
-  bot.sendMessage(chatId, `Доступные команды:\n/start - Связать Telegram с аккаунтом\n/status - Проверить статус аккаунта и приложений\n/help - Показать это сообщение`);
+  logger.info(`Received /help command from Telegram ID: ${chatId}`);
+  bot.sendMessage(chatId, `*Доступные команды*:\n/start - Связать Telegram с аккаунтом\n/status - Проверить статус аккаунта и приложений\n/website - Посетить наш сайт\n/help - Показать это сообщение\n\nПосетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
 });
 
-// Инициализация сервера
+bot.onText(/\/website/, (msg) => {
+  const chatId = msg.chat.id;
+  logger.info(`Received /website command from Telegram ID: ${chatId}`);
+  bot.sendMessage(chatId, `Посетите наш сайт: [Перейти](${WEBSITE_URL})`, { parse_mode: 'Markdown' });
+});
+
+// Server initialization
 async function initializeServer() {
   try {
     await initializeDatabase();
     await checkS3Connection();
     app.listen(PORT, () => {
-      logger.info(`Сервер запущен на порту ${PORT}`);
+      logger.info(`Server running on port ${PORT}`);
     });
   } catch (err) {
-    logger.error(`Ошибка инициализации сервера: ${err.message}, стек: ${err.stack}`);
+    logger.error(`Server initialization error: ${err.message}, stack: ${err.stack}`);
     process.exit(1);
   }
 }
 
-// Публичные маршруты
+// Public routes
 app.get('/api/public/apps', async (req, res) => {
   try {
     const [apps] = await db.query(`
@@ -489,8 +509,8 @@ app.get('/api/public/apps', async (req, res) => {
     `);
     res.json(apps);
   } catch (err) {
-    logger.error(`Ошибка получения приложений: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`Error fetching apps: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
@@ -501,40 +521,40 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
     res.setHeader('Content-Type', image.ContentType || 'image/png');
     image.Body.pipe(res);
   } catch (err) {
-    logger.error(`Ошибка получения изображения: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка получения изображения', error: err.message });
+    logger.error(`Error fetching image: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Error fetching image', error: err.message });
   }
 });
 
 app.post(
   '/api/pre-register',
-  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
+  [body('email').isEmail().normalizeEmail().withMessage('Valid email required')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const { email } = req.body;
       const [existing] = await db.query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
       if (existing.length > 0) {
-        return res.status(400).json({ message: 'Email уже в списке ожидания' });
+        return res.status(400).json({ message: 'Email already in waitlist' });
       }
 
       await db.query('INSERT INTO PreRegisters (email) VALUES (?)', [email]);
-      logger.info(`Предрегистрация: ${email}`);
+      logger.info(`Pre-registration: ${email}`);
 
       await telegramQueue.add({
         chatId: '-1002311447135',
-        text: `Новая предрегистрация: ${email}`,
+        text: `New pre-registration: ${email}`,
       });
 
-      res.status(201).json({ message: `Спасибо! Ваш email (${email}) добавлен в список ожидания.` });
+      res.status(201).json({ message: `Thank you! Your email (${email}) has been added to the waitlist.` });
     } catch (error) {
-      logger.error(`Ошибка предрегистрации: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Pre-registration error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -543,18 +563,18 @@ app.post(
   '/api/auth/register',
   upload,
   [
-    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
-    body('password').isLength({ min: 8 }).withMessage('Пароль должен содержать минимум 8 символов'),
-    body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
-    body('name').notEmpty().trim().withMessage('Требуется имя'),
-    body('phone').notEmpty().trim().withMessage('Требуется номер телефона'),
-    body('telegramId').optional().matches(/^(@[A-Za-z0-9_]{5,}|[\d]+)$/).withMessage('Недопустимый формат Telegram ID'),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('accountType').isIn(['individual', 'commercial']).withMessage('Invalid account type'),
+    body('name').notEmpty().trim().withMessage('Name required'),
+    body('phone').notEmpty().trim().withMessage('Phone number required'),
+    body('telegramId').optional().matches(/^(@[A-Za-z0-9_]{5,}|[\d]+)$/).withMessage('Invalid Telegram ID format'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
@@ -562,26 +582,25 @@ app.post(
 
       const [existingUser] = await db.query('SELECT email FROM Users WHERE email = ?', [email]);
       if (existingUser.length > 0) {
-        return res.status(400).json({ message: 'Email уже зарегистрирован' });
+        return res.status(400).json({ message: 'Email already registered' });
       }
 
       if (telegramId) {
         const [existingTelegram] = await db.query('SELECT telegramId FROM Users WHERE telegramId = ?', [telegramId]);
         if (existingTelegram.length > 0) {
-          return res.status(400).json({ message: 'Telegram ID уже используется' });
+          return res.status(400).json({ message: 'Telegram ID already in use' });
         }
       }
 
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('Документы не загружены');
-        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
+        logger.warn('No documents uploaded');
+        return res.status(400).json({ message: 'At least one document is required' });
       }
 
-      // Ограничение времени загрузки документов
       const documentUrls = await Promise.all(req.files.documents.map(file => 
         Promise.race([
           uploadToS3(file, 'documents'),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки документа')), 30000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Document upload timeout')), 30000))
         ])
       ));
 
@@ -602,30 +621,29 @@ app.post(
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
-      // Асинхронная отправка уведомления без ожидания
       telegramQueue.add({
         chatId: '-1002311447135',
-        text: `Новые документы для проверки от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
+        text: `New documents for review from user ${email} (registration). Count: ${documentUrls.length}`,
       }, { attempts: 3, backoff: 5000 });
 
       if (telegramId) {
         telegramQueue.add({
           chatId: telegramId,
-          text: `Добро пожаловать, ${name}! Ваши документы отправлены на проверку. Вы получите уведомление после верификации.`,
+          text: `Welcome, ${name}! Your documents have been submitted for review. You'll be notified once verified.\n\nVisit our website: [Go](${WEBSITE_URL})`,
         }, { attempts: 3, backoff: 5000 });
       }
 
-      logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
+      logger.info(`User registered: ${email}, documents: ${JSON.stringify(documentUrls)}`);
       res.status(201).json({
         message: telegramId 
-          ? 'Регистрация успешна. Ваши документы отправлены на проверку.'
-          : 'Регистрация успешна. Укажите ваш Telegram ID в профиле или через бот для получения уведомлений.',
+          ? `Registration successful. Your documents have been submitted for review.\nVisit our website: ${WEBSITE_URL}`
+          : `Registration successful. Please provide your Telegram ID in your profile or via the bot to receive notifications.\nVisit our website: ${WEBSITE_URL}`,
         token: authToken,
         user: { id: result.insertId, email, accountType, name, phone, telegramId, isVerified: false },
       });
     } catch (error) {
-      logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Registration error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -633,67 +651,67 @@ app.post(
 app.post(
   '/api/auth/login',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
-    body('password').notEmpty().withMessage('Требуется пароль'),
+    body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+    body('password').notEmpty().withMessage('Password required'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const { email, password } = req.body;
       const [user] = await db.query('SELECT * FROM Users WHERE email = ?', [email]);
       if (!user.length) {
-        logger.warn(`Попытка входа с несуществующим email: ${email}`);
-        return res.status(400).json({ message: 'Неверный email или пароль' });
+        logger.warn(`Login attempt with non-existent email: ${email}`);
+        return res.status(400).json({ message: 'Invalid email or password' });
       }
 
       if (user[0].isBlocked) {
-        logger.warn(`Попытка входа заблокированного пользователя: ${email}`);
-        return res.status(403).json({ message: 'Ваш аккаунт заблокирован' });
+        logger.warn(`Login attempt by blocked user: ${email}`);
+        return res.status(403).json({ message: 'Your account is blocked' });
       }
 
       const isMatch = await bcrypt.compare(password, user[0].password);
       if (!isMatch) {
-        logger.warn(`Неверный пароль для email: ${email}`);
-        return res.status(400).json({ message: 'Неверный email или пароль' });
+        logger.warn(`Invalid password for email: ${email}`);
+        return res.status(400).json({ message: 'Invalid email or password' });
       }
 
       const token = jwt.sign({ id: user[0].id, email: user[0].email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user[0].id]);
 
-      logger.info(`Пользователь вошел: ${user[0].email}`);
+      logger.info(`User logged in: ${user[0].email}`);
       res.status(200).json({
         token,
         user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone, telegramId: user[0].telegramId, isVerified: user[0].isVerified },
-        message: user[0].isVerified ? 'Вход успешен' : 'Вход успешен, но аккаунт ожидает верификации документов',
+        message: user[0].isVerified ? 'Login successful' : 'Login successful, but account awaits document verification',
       });
     } catch (error) {
-      logger.error(`Ошибка входа: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Login error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
 app.post(
   '/api/auth/forgot-password',
-  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
+  [body('email').isEmail().normalizeEmail().withMessage('Valid email required')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const { email } = req.body;
       const [user] = await db.query('SELECT id, email, telegramId FROM Users WHERE email = ?', [email]);
       if (!user.length) {
-        logger.warn(`Попытка сброса пароля для несуществующего email: ${email}`);
-        return res.status(404).json({ message: 'Пользователь с таким email не найден' });
+        logger.warn(`Password reset attempt for non-existent email: ${email}`);
+        return res.status(404).json({ message: 'User with this email not found' });
       }
 
       const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
@@ -705,15 +723,15 @@ app.post(
       if (user[0].telegramId) {
         telegramQueue.add({
           chatId: user[0].telegramId,
-          text: `Запрос на сброс пароля. Перейдите по ссылке: https://your-app-domain.com/reset-password/${resetToken}`,
+          text: `Password reset request. Follow the link: [Reset Password](${WEBSITE_URL}/reset-password/${resetToken})`,
         }, { attempts: 3, backoff: 5000 });
       }
 
-      logger.info(`Запрошен сброс пароля для ${user[0].email}`);
-      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена на ваш Telegram, если он указан' });
+      logger.info(`Password reset requested for ${user[0].email}`);
+      res.status(200).json({ message: 'Password reset link sent to your Telegram if provided' });
     } catch (error) {
-      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Password reset error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -721,14 +739,14 @@ app.post(
 app.post(
   '/api/auth/reset-password/:token',
   [
-    body('password').isLength({ min: 8 }).withMessage('Пароль должен содержать минимум 8 символов'),
-    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Пароли не совпадают'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Passwords do not match'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
@@ -738,8 +756,8 @@ app.post(
       try {
         decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
-        logger.warn(`Недействительный токен сброса: ${error.message}, стек: ${error.stack}`);
-        return res.status(400).json({ message: 'Недействительный или истекший токен' });
+        logger.warn(`Invalid reset token: ${error.message}, stack: ${error.stack}`);
+        return res.status(400).json({ message: 'Invalid or expired token' });
       }
 
       const [user] = await db.query(
@@ -747,8 +765,8 @@ app.post(
         [decoded.email, token]
       );
       if (!user.length) {
-        logger.warn(`Недействительный или истекший токен сброса для email: ${decoded.email}`);
-        return res.status(400).json({ message: 'Недействительный или истекший токен' });
+        logger.warn(`Invalid or expired reset token for email: ${decoded.email}`);
+        return res.status(400).json({ message: 'Invalid or expired token' });
       }
 
       const salt = await bcrypt.genSalt(10);
@@ -758,11 +776,11 @@ app.post(
         [hashedPassword, decoded.email]
       );
 
-      logger.info(`Пароль сброшен для ${user[0].email}`);
-      res.status(200).json({ message: 'Пароль успешно сброшен' });
+      logger.info(`Password reset for ${user[0].email}`);
+      res.status(200).json({ message: 'Password successfully reset' });
     } catch (error) {
-      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Password reset error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -774,8 +792,8 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
       [req.user.id]
     );
     if (!user.length) {
-      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
-      return res.status(404).json({ message: 'Пользователь не найден' });
+      logger.warn(`User not found for ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'User not found' });
     }
 
     let documents = [];
@@ -785,15 +803,15 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
         if (!Array.isArray(documents)) documents = [documents];
       }
     } catch (parseError) {
-      logger.error(`Ошибка парсинга документов для пользователя ${user[0].email}: ${parseError.message}`);
+      logger.error(`Document parsing error for user ${user[0].email}: ${parseError.message}`);
       documents = [];
     }
 
     user[0].documents = documents;
     res.status(200).json(user[0]);
   } catch (error) {
-    logger.error(`Ошибка получения профиля: ${error.message}, стек: ${error.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+    logger.error(`Profile fetch error: ${error.message}, stack: ${error.stack}`);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -805,20 +823,19 @@ app.post(
     try {
       const [user] = await db.query('SELECT id, email, documents, telegramId FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
-        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'Пользователь не найден' });
+        logger.warn(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'User not found' });
       }
 
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('Документы не загружены');
-        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
+        logger.warn('No documents uploaded');
+        return res.status(400).json({ message: 'At least one document is required' });
       }
 
-      // Ограничение времени загрузки документов
       const newDocuments = await Promise.all(req.files.documents.map(file => 
         Promise.race([
           uploadToS3(file, 'documents'),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки документа')), 30000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Document upload timeout')), 30000))
         ])
       ));
 
@@ -827,7 +844,7 @@ app.post(
         currentDocuments = user[0].documents ? JSON.parse(user[0].documents) : [];
         if (!Array.isArray(currentDocuments)) currentDocuments = [currentDocuments];
       } catch (parseError) {
-        logger.error(`Ошибка парсинга текущих документов для пользователя ${user[0].email}: ${parseError.message}`);
+        logger.error(`Current documents parsing error for user ${user[0].email}: ${parseError.message}`);
         currentDocuments = [];
       }
 
@@ -836,27 +853,26 @@ app.post(
         JSON.stringify(updatedDocuments), false, user[0].id
       ]);
 
-      // Асинхронная отправка уведомления без ожидания
       telegramQueue.add({
         chatId: '-1002311447135',
-        text: `Новые документы для проверки от пользователя ${user[0].email}. Количество: ${newDocuments.length}`,
+        text: `New documents for review from user ${user[0].email}. Count: ${newDocuments.length}`,
       }, { attempts: 3, backoff: 5000 });
 
       if (user[0].telegramId) {
         telegramQueue.add({
           chatId: user[0].telegramId,
-          text: `Ваши новые документы отправлены на проверку. Вы получите уведомление после верификации.`,
+          text: `Your new documents have been submitted for review. You'll be notified once verified.\n\nVisit our website: [Go](${WEBSITE_URL})`,
         }, { attempts: 3, backoff: 5000 });
       }
 
-      logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
+      logger.info(`Documents updated for user ${user[0].email}, new documents: ${JSON.stringify(updatedDocuments)}`);
       res.status(200).json({ 
-        message: 'Документы успешно загружены и ожидают проверки администратором', 
+        message: 'Documents successfully uploaded and awaiting admin review', 
         documents: updatedDocuments 
       });
     } catch (error) {
-      logger.error(`Ошибка обновления документов: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Document update error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
@@ -866,50 +882,49 @@ app.post(
   authenticateToken,
   upload,
   [
-    body('name').notEmpty().trim().withMessage('Требуется название приложения'),
-    body('description').notEmpty().trim().withMessage('Требуется описание'),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Недопустимая категория'),
+    body('name').notEmpty().trim().withMessage('App name required'),
+    body('description').notEmpty().trim().withMessage('Description required'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
     }
 
     try {
       const [user] = await db.query('SELECT id, email, isVerified FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
-        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'Пользователь не найден' });
+        logger.warn(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'User not found' });
       }
 
       if (!user[0].isVerified) {
-        logger.warn(`Пользователь не верифицирован: ${user[0].email}`);
-        return res.status(403).json({ message: 'Аккаунт должен быть верифицирован для отправки приложений' });
+        logger.warn(`Unverified user: ${user[0].email}`);
+        return res.status(403).json({ message: 'Account must be verified to submit apps' });
       }
 
       const { name, description, category } = req.body;
       const files = req.files;
 
       if (!files || !files.icon || !files.icon[0]) {
-        logger.warn('Файл иконки отсутствует');
-        return res.status(400).json({ message: 'Требуется файл иконки (только PNG)' });
+        logger.warn('Icon file missing');
+        return res.status(400).json({ message: 'Icon file required (PNG only)' });
       }
       if (!files.apk || !files.apk[0]) {
-        logger.warn('Файл APK отсутствует');
-        return res.status(400).json({ message: 'Требуется файл APK' });
+        logger.warn('APK file missing');
+        return res.status(400).json({ message: 'APK file required' });
       }
 
-      // Ограничение времени загрузки файлов
       const [iconUrl, apkUrl] = await Promise.all([
         Promise.race([
           uploadToS3(files.icon[0], 'icons'),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки иконки')), 30000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Icon upload timeout')), 30000))
         ]),
         Promise.race([
           uploadToS3(files.apk[0], 'apks'),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки APK')), 30000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('APK upload timeout')), 30000))
         ])
       ]);
 
@@ -920,30 +935,30 @@ app.post(
         [name, description, category, iconUrl, apkUrl, user[0].id, 'pending']
       );
 
-      logger.info(`Приложение создано пользователем ${user[0].email}: ${name}`);
+      logger.info(`App created by user ${user[0].email}: ${name}`);
 
       telegramQueue.add({
         chatId: '-1002311447135',
-        text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
+        text: `New app submitted: ${name} by ${user[0].email}`,
       }, { attempts: 3, backoff: 5000 });
 
       res.status(201).json({
-        message: 'Приложение успешно отправлено',
+        message: 'App successfully submitted',
         app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending' },
       });
     } catch (error) {
-      logger.error(`Ошибка создания приложения: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`App creation error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
 );
 
-// Админ-маршруты
+// Admin routes
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     const [apps] = await db.query(`
@@ -954,8 +969,8 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
     `);
     res.json(apps);
   } catch (err) {
-    logger.error(`Ошибка получения приложений для админа: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`Error fetching admin apps: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
@@ -966,35 +981,35 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     if (!['pending', 'approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ message: 'Недопустимый статус' });
+      return res.status(400).json({ message: 'Invalid status' });
     }
 
     const [app] = await db.query('SELECT * FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
-      return res.status(404).json({ message: 'Приложение не найдено' });
+      return res.status(404).json({ message: 'App not found' });
     }
 
     await db.query('UPDATE Apps SET status = ? WHERE id = ?', [status, id]);
-    logger.info(`Статус приложения ${id} обновлен на ${status}`);
+    logger.info(`App ${id} status updated to ${status}`);
 
     if (status !== 'pending') {
       const [appUser] = await db.query('SELECT email, telegramId FROM Users WHERE id = ?', [app[0].userId]);
       if (appUser[0].telegramId) {
         telegramQueue.add({
           chatId: appUser[0].telegramId,
-          text: `Статус приложения ${app[0].name} обновлен на ${status} для пользователя ${appUser[0].email}`,
+          text: `App ${app[0].name} status updated to ${status} for user ${appUser[0].email}`,
         }, { attempts: 3, backoff: 5000 });
       }
     }
 
-    res.json({ message: `Статус приложения обновлен на ${status}` });
+    res.json({ message: `App status updated to ${status}` });
   } catch (err) {
-    logger.error(`Ошибка обновления приложения: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`App update error: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
@@ -1004,12 +1019,12 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     const [app] = await db.query('SELECT iconPath, apkPath FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
-      return res.status(404).json({ message: 'Приложение не найдено' });
+      return res.status(404).json({ message: 'App not found' });
     }
 
     if (app[0].iconPath) {
@@ -1022,12 +1037,12 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     }
 
     await db.query('DELETE FROM Apps WHERE id = ?', [id]);
-    logger.info(`Приложение ${id} удалено`);
+    logger.info(`App ${id} deleted`);
 
-    res.json({ message: 'Приложение удалено' });
+    res.json({ message: 'App deleted' });
   } catch (err) {
-    logger.error(`Ошибка удаления приложения: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`App deletion error: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
@@ -1035,7 +1050,7 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     const [users] = await db.query(`
@@ -1051,7 +1066,7 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
         documents = u.documents ? JSON.parse(u.documents) : [];
         if (!Array.isArray(documents)) documents = [documents];
       } catch (parseError) {
-        logger.error(`Ошибка парсинга документов для пользователя ${u.email}: ${parseError.message}`);
+        logger.error(`Document parsing error for user ${u.email}: ${parseError.message}`);
         documents = [];
       }
       return { ...u, documents };
@@ -1059,8 +1074,8 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
 
     res.json(usersWithDocuments);
   } catch (err) {
-    logger.error(`Ошибка получения документов пользователей для админа: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`Error fetching user documents for admin: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
@@ -1071,43 +1086,42 @@ app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
   try {
     const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     if (typeof isVerified !== 'boolean') {
-      return res.status(400).json({ message: 'Недопустимый статус верификации' });
+      return res.status(400).json({ message: 'Invalid verification status' });
     }
 
     const [user] = await db.query('SELECT email, telegramId, name FROM Users WHERE id = ?', [id]);
     if (!user.length) {
-      return res.status(404).json({ message: 'Пользователь не найден' });
+      return res.status(404).json({ message: 'User not found' });
     }
 
     await db.query('UPDATE Users SET isVerified = ? WHERE id = ?', [isVerified, id]);
-    logger.info(`Статус верификации пользователя ${user[0].email} обновлен на ${isVerified}`);
+    logger.info(`Verification status for user ${user[0].email} updated to ${isVerified}`);
 
     if (user[0].telegramId) {
       telegramQueue.add({
         chatId: user[0].telegramId,
         text: isVerified 
-          ? `Поздравляем, ${user[0].name}! Ваш аккаунт успешно верифицирован.` 
-          : `Уважаемый ${user[0].name}, ваш аккаунт не прошел верификацию. Пожалуйста, загрузите корректные документы.`,
+          ? `Congratulations, ${user[0].name}! Your account has been verified.\n\nVisit our website: [Go](${WEBSITE_URL})`
+          : `Dear ${user[0].name}, your account verification failed. Please upload valid documents.\n\nVisit our website: [Go](${WEBSITE_URL})`,
       }, { attempts: 3, backoff: 5000 });
     }
 
-    res.json({ message: `Статус верификации обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}` });
+    res.json({ message: `Verification status updated to ${isVerified ? 'verified' : 'not verified'}` });
   } catch (err) {
-    logger.error(`Ошибка верификации пользователя: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`User verification error: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Новый маршрут для рекламы
 app.get('/api/admin/advertisements', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     const [ads] = await db.query(`
@@ -1118,12 +1132,11 @@ app.get('/api/admin/advertisements', authenticateToken, async (req, res) => {
     `);
     res.json(ads);
   } catch (err) {
-    logger.error(`Ошибка получения рекламы: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`Error fetching advertisements: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Новый маршрут для блокировки пользователя
 app.put('/api/admin/users/:id/block', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { isBlocked } = req.body;
@@ -1131,49 +1144,48 @@ app.put('/api/admin/users/:id/block', authenticateToken, async (req, res) => {
   try {
     const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     if (typeof isBlocked !== 'boolean') {
-      return res.status(400).json({ message: 'Недопустимый статус блокировки' });
+      return res.status(400).json({ message: 'Invalid block status' });
     }
 
     const [user] = await db.query('SELECT email, telegramId FROM Users WHERE id = ?', [id]);
     if (!user.length) {
-      return res.status(404).json({ message: 'Пользователь не найден' });
+      return res.status(404).json({ message: 'User not found' });
     }
 
     await db.query('UPDATE Users SET isBlocked = ? WHERE id = ?', [isBlocked, id]);
-    logger.info(`Статус блокировки пользователя ${user[0].email} обновлен на ${isBlocked}`);
+    logger.info(`Block status for user ${user[0].email} updated to ${isBlocked}`);
 
     if (user[0].telegramId) {
       telegramQueue.add({
         chatId: user[0].telegramId,
         text: isBlocked 
-          ? 'Ваш аккаунт был заблокирован. Свяжитесь с администратором.' 
-          : 'Ваш аккаунт разблокирован.',
+          ? `Your account has been blocked. Contact the administrator.\n\nVisit our website: [Go](${WEBSITE_URL})`
+          : `Your account has been unblocked.\n\nVisit our website: [Go](${WEBSITE_URL})`,
       }, { attempts: 3, backoff: 5000 });
     }
 
-    res.json({ message: `Пользователь ${isBlocked ? 'заблокирован' : 'разблокирован'}` });
+    res.json({ message: `User ${isBlocked ? 'blocked' : 'unblocked'}` });
   } catch (err) {
-    logger.error(`Ошибка блокировки пользователя: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`User block error: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Улучшенная массовая рассылка
 app.post('/api/admin/notify-all', authenticateToken, async (req, res) => {
   const { message } = req.body;
 
   try {
     const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Требуется доступ администратора' });
+      return res.status(403).json({ message: 'Admin access required' });
     }
 
     if (!message || typeof message !== 'string') {
-      return res.status(400).json({ message: 'Требуется текст сообщения' });
+      return res.status(400).json({ message: 'Message text required' });
     }
 
     const [users] = await db.query('SELECT telegramId, email FROM Users WHERE telegramId IS NOT NULL AND isBlocked = FALSE');
@@ -1184,50 +1196,50 @@ app.post('/api/admin/notify-all', authenticateToken, async (req, res) => {
       try {
         await telegramQueue.add({
           chatId: user.telegramId,
-          text: message,
+          text: `${message}\n\nVisit our website: [Go](${WEBSITE_URL})`,
         }, { attempts: 3, backoff: 5000 });
         successCount++;
       } catch (err) {
         errorCount++;
-        logger.error(`Ошибка отправки уведомления пользователю ${user.email}: ${err.message}`);
+        logger.error(`Notification error for user ${user.email}: ${err.message}`);
       }
     }
 
-    logger.info(`Массовая рассылка завершена: успешно запланировано ${successCount}, ошибок ${errorCount}`);
+    logger.info(`Mass notification completed: ${successCount} scheduled, ${errorCount} errors`);
     res.status(200).json({ 
-      message: `Уведомления запланированы: ${successCount} пользователей`,
+      message: `Notifications scheduled for ${successCount} users`,
       successCount,
       errorCount
     });
   } catch (err) {
-    logger.error(`Ошибка массовой рассылки: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    logger.error(`Mass notification error: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Обработка ошибок
+// Error handling
 app.use((err, req, res, next) => {
-  logger.error(`Необработанная ошибка: ${err.message}, стек: ${err.stack}, маршрут: ${req.originalUrl}`);
+  logger.error(`Unhandled error: ${err.message}, stack: ${err.stack}, route: ${req.originalUrl}`);
   if (err instanceof multer.MulterError) {
-    logger.warn(`Ошибка Multer: ${err.message}`);
-    return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
+    logger.warn(`Multer error: ${err.message}`);
+    return res.status(400).json({ message: `File upload error: ${err.message}` });
   }
-  if (err.message.includes('Разрешены только') || err.message.includes('Таймаут загрузки')) {
-    logger.warn(`Ошибка типа файла или таймаута: ${err.message}`);
+  if (err.message.includes('Only') || err.message.includes('upload timeout')) {
+    logger.warn(`File type or timeout error: ${err.message}`);
     return res.status(400).json({ message: err.message });
   }
-  res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  res.status(500).json({ message: 'Server error', error: err.message });
 });
 
-// Грациозное завершение работы
+// Graceful shutdown
 async function shutdown() {
-  logger.info('Выполняется грациозное завершение работы...');
+  logger.info('Performing graceful shutdown...');
   try {
     await telegramQueue.close();
     await db.end();
-    logger.info('Соединение с базой данных и очередью закрыто');
+    logger.info('Database and queue connections closed');
   } catch (err) {
-    logger.error(`Ошибка при завершении работы: ${err.message}`);
+    logger.error(`Shutdown error: ${err.message}`);
   }
   process.exit(0);
 }
@@ -1235,5 +1247,5 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Запуск сервера
+// Start server
 initializeServer();
