@@ -93,45 +93,50 @@ const db = mysql.createPool({
   database: DB_NAME,
   port: 3306,
   connectionLimit: 10,
-  connectTimeout: 30000,
+  connectTimeout: 10000, // Уменьшен таймаут подключения
 });
 
-// Настройка Multer
+// Настройка Multer с улучшенной обработкой ошибок
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.fieldname === 'icon') {
-      const validMimeTypes = ['image/png'];
-      const validExtensions = /\.png$/i;
-      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = validMimeTypes.includes(file.mimetype);
-      if (extname && mimetype) return cb(null, true);
-      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы PNG для иконок!'));
-    } else if (file.fieldname === 'apk') {
-      const extname = file.originalname.toLowerCase().endsWith('.apk');
-      const validMimeTypes = [
-        'application/vnd.android.package-archive',
-        'application/octet-stream',
-        'application/x-apk',
-        'application/zip',
-      ];
-      const mimetype = validMimeTypes.includes(file.mimetype);
-      if (extname && mimetype) return cb(null, true);
-      logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы APK!'));
-    } else if (file.fieldname === 'documents') {
-      const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
-      const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
-      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = validMimeTypes.includes(file.mimetype);
-      if (extname && mimetype) return cb(null, true);
-      logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
-    } else {
-      logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
-      cb(new Error('Недопустимое имя поля!'));
+    try {
+      if (file.fieldname === 'icon') {
+        const validMimeTypes = ['image/png'];
+        const validExtensions = /\.png$/i;
+        const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = validMimeTypes.includes(file.mimetype);
+        if (extname && mimetype) return cb(null, true);
+        logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
+        cb(new Error('Разрешены только файлы PNG для иконок!'));
+      } else if (file.fieldname === 'apk') {
+        const extname = file.originalname.toLowerCase().endsWith('.apk');
+        const validMimeTypes = [
+          'application/vnd.android.package-archive',
+          'application/octet-stream',
+          'application/x-apk',
+          'application/zip',
+        ];
+        const mimetype = validMimeTypes.includes(file.mimetype);
+        if (extname && mimetype) return cb(null, true);
+        logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
+        cb(new Error('Разрешены только файлы APK!'));
+      } else if (file.fieldname === 'documents') {
+        const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+        const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
+        const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = validMimeTypes.includes(file.mimetype);
+        if (extname && mimetype) return cb(null, true);
+        logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
+        cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
+      } else {
+        logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
+        cb(new Error('Недопустимое имя поля!'));
+      }
+    } catch (err) {
+      logger.error(`Ошибка в фильтре Multer: ${err.message}`);
+      cb(err);
     }
   },
 }).fields([
@@ -154,8 +159,13 @@ async function uploadToS3(file, folder) {
   };
 
   try {
-    const upload = new Upload({ client: s3Client, params });
-    await upload.done();
+    // Добавлен таймаут для S3
+    const upload = new Upload({
+      client: s3Client,
+      params,
+      timeout: 30000, // 30 секунд таймаута
+    });
+    const result = await upload.done();
     const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
     logger.info(`Файл загружен в S3: ${key}, URL: ${location}`);
     return location;
@@ -236,7 +246,8 @@ telegramQueue.process(async (job) => {
   try {
     await axios.post(
       `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      { chat_id: chatId, text, parse_mode: 'Markdown' }
+      { chat_id: chatId, text, parse_mode: 'Markdown' },
+      { timeout: 10000 } // Добавлен таймаут для Telegram API
     );
     logger.info(`Уведомление отправлено на Telegram ${chatId}: ${text}`);
   } catch (err) {
@@ -372,37 +383,42 @@ bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   logger.info(`Получена команда /start от Telegram ID: ${chatId}`);
 
-  const [user] = await db.query('SELECT email, isVerified FROM Users WHERE telegramId = ?', [chatId]);
-  if (user.length > 0) {
-    if (user[0].isVerified) {
-      bot.sendMessage(chatId, 'Ваш аккаунт уже верифицирован.');
-    } else {
-      bot.sendMessage(chatId, `Ваш аккаунт связан с email: ${user[0].email}. Ожидайте проверки документов администратором.`);
-    }
-  } else {
-    bot.sendMessage(chatId, 'Пожалуйста, введите email, который вы использовали при регистрации:');
-    bot.once('message', async (msg) => {
-      const email = msg.text.trim();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        bot.sendMessage(chatId, 'Недействительный email. Попробуйте снова с командой /start.');
-        return;
-      }
-
-      const [existingUser] = await db.query('SELECT id, isVerified FROM Users WHERE email = ?', [email]);
-      if (!existingUser.length) {
-        bot.sendMessage(chatId, 'Email не найден. Пожалуйста, зарегистрируйтесь на сайте.');
-        return;
-      }
-
-      if (existingUser[0].isVerified) {
+  try {
+    const [user] = await db.query('SELECT email, isVerified FROM Users WHERE telegramId = ?', [chatId]);
+    if (user.length > 0) {
+      if (user[0].isVerified) {
         bot.sendMessage(chatId, 'Ваш аккаунт уже верифицирован.');
-        return;
+      } else {
+        bot.sendMessage(chatId, `Ваш аккаунт связан с email: ${user[0].email}. Ожидайте проверки документов администратором.`);
       }
+    } else {
+      bot.sendMessage(chatId, 'Пожалуйста, введите email, который вы использовали при регистрации:');
+      bot.once('message', async (msg) => {
+        const email = msg.text.trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          bot.sendMessage(chatId, 'Недействительный email. Попробуйте снова с командой /start.');
+          return;
+        }
 
-      await db.query('UPDATE Users SET telegramId = ? WHERE email = ?', [chatId, email]);
-      bot.sendMessage(chatId, 'Ваш email успешно связан. Ожидайте проверки документов администратором.');
-      logger.info(`Telegram ID ${chatId} связан с email: ${email}`);
-    });
+        const [existingUser] = await db.query('SELECT id, isVerified FROM Users WHERE email = ?', [email]);
+        if (!existingUser.length) {
+          bot.sendMessage(chatId, 'Email не найден. Пожалуйста, зарегистрируйтесь на сайте.');
+          return;
+        }
+
+        if (existingUser[0].isVerified) {
+          bot.sendMessage(chatId, 'Ваш аккаунт уже верифицирован.');
+          return;
+        }
+
+        await db.query('UPDATE Users SET telegramId = ? WHERE email = ?', [chatId, email]);
+        bot.sendMessage(chatId, 'Ваш email успешно связан. Ожидайте проверки документов администратором.');
+        logger.info(`Telegram ID ${chatId} связан с email: ${email}`);
+      });
+    }
+  } catch (err) {
+    logger.error(`Ошибка обработки /start: ${err.message}`);
+    bot.sendMessage(chatId, 'Произошла ошибка. Попробуйте позже.');
   }
 });
 
@@ -411,29 +427,34 @@ bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
   logger.info(`Получена команда /status от Telegram ID: ${chatId}`);
 
-  const [user] = await db.query('SELECT email, isVerified, isBlocked FROM Users WHERE telegramId = ?', [chatId]);
-  if (!user.length) {
-    bot.sendMessage(chatId, 'Ваш Telegram ID не связан с аккаунтом. Используйте команду /start и укажите email.');
-    return;
-  }
+  try {
+    const [user] = await db.query('SELECT email, isVerified, isBlocked FROM Users WHERE telegramId = ?', [chatId]);
+    if (!user.length) {
+      bot.sendMessage(chatId, 'Ваш Telegram ID не связан с аккаунтом. Используйте команду /start и укажите email.');
+      return;
+    }
 
-  if (user[0].isBlocked) {
-    bot.sendMessage(chatId, 'Ваш аккаунт заблокирован. Свяжитесь с администратором.');
-    return;
-  }
+    if (user[0].isBlocked) {
+      bot.sendMessage(chatId, 'Ваш аккаунт заблокирован. Свяжитесь с администратором.');
+      return;
+    }
 
-  const [apps] = await db.query('SELECT name, status FROM Apps WHERE userId = (SELECT id FROM Users WHERE telegramId = ?)', [chatId]);
-  let response = `Статус аккаунта (${user[0].email}): ${user[0].isVerified ? 'Верифицирован' : 'Ожидает верификации'}\n\n`;
-  response += 'Ваши приложения:\n';
-  if (apps.length === 0) {
-    response += 'У вас нет приложений.';
-  } else {
-    apps.forEach(app => {
-      response += `- ${app.name}: ${app.status}\n`;
-    });
-  }
+    const [apps] = await db.query('SELECT name, status FROM Apps WHERE userId = (SELECT id FROM Users WHERE telegramId = ?)', [chatId]);
+    let response = `Статус аккаунта (${user[0].email}): ${user[0].isVerified ? 'Верифицирован' : 'Ожидает верификации'}\n\n`;
+    response += 'Ваши приложения:\n';
+    if (apps.length === 0) {
+      response += 'У вас нет приложений.';
+    } else {
+      apps.forEach(app => {
+        response += `- ${app.name}: ${app.status}\n`;
+      });
+    }
 
-  bot.sendMessage(chatId, response);
+    bot.sendMessage(chatId, response);
+  } catch (err) {
+    logger.error(`Ошибка обработки /status: ${err.message}`);
+    bot.sendMessage(chatId, 'Произошла ошибка. Попробуйте позже.');
+  }
 });
 
 // Обработка команды /help
@@ -556,7 +577,14 @@ app.post(
         return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
-      const documentUrls = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
+      // Ограничение времени загрузки документов
+      const documentUrls = await Promise.all(req.files.documents.map(file => 
+        Promise.race([
+          uploadToS3(file, 'documents'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки документа')), 30000))
+        ])
+      ));
+
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -574,16 +602,17 @@ app.post(
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
-      await telegramQueue.add({
+      // Асинхронная отправка уведомления без ожидания
+      telegramQueue.add({
         chatId: '-1002311447135',
         text: `Новые документы для проверки от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
-      });
+      }, { attempts: 3, backoff: 5000 });
 
       if (telegramId) {
-        await telegramQueue.add({
+        telegramQueue.add({
           chatId: telegramId,
           text: `Добро пожаловать, ${name}! Ваши документы отправлены на проверку. Вы получите уведомление после верификации.`,
-        });
+        }, { attempts: 3, backoff: 5000 });
       }
 
       logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
@@ -674,10 +703,10 @@ app.post(
       );
 
       if (user[0].telegramId) {
-        await telegramQueue.add({
+        telegramQueue.add({
           chatId: user[0].telegramId,
           text: `Запрос на сброс пароля. Перейдите по ссылке: https://your-app-domain.com/reset-password/${resetToken}`,
-        });
+        }, { attempts: 3, backoff: 5000 });
       }
 
       logger.info(`Запрошен сброс пароля для ${user[0].email}`);
@@ -785,7 +814,14 @@ app.post(
         return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
-      const newDocuments = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
+      // Ограничение времени загрузки документов
+      const newDocuments = await Promise.all(req.files.documents.map(file => 
+        Promise.race([
+          uploadToS3(file, 'documents'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки документа')), 30000))
+        ])
+      ));
+
       let currentDocuments = [];
       try {
         currentDocuments = user[0].documents ? JSON.parse(user[0].documents) : [];
@@ -800,16 +836,17 @@ app.post(
         JSON.stringify(updatedDocuments), false, user[0].id
       ]);
 
-      await telegramQueue.add({
+      // Асинхронная отправка уведомления без ожидания
+      telegramQueue.add({
         chatId: '-1002311447135',
         text: `Новые документы для проверки от пользователя ${user[0].email}. Количество: ${newDocuments.length}`,
-      });
+      }, { attempts: 3, backoff: 5000 });
 
       if (user[0].telegramId) {
-        await telegramQueue.add({
+        telegramQueue.add({
           chatId: user[0].telegramId,
           text: `Ваши новые документы отправлены на проверку. Вы получите уведомление после верификации.`,
-        });
+        }, { attempts: 3, backoff: 5000 });
       }
 
       logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
@@ -864,8 +901,17 @@ app.post(
         return res.status(400).json({ message: 'Требуется файл APK' });
       }
 
-      const iconUrl = await uploadToS3(files.icon[0], 'icons');
-      const apkUrl = await uploadToS3(files.apk[0], 'apks');
+      // Ограничение времени загрузки файлов
+      const [iconUrl, apkUrl] = await Promise.all([
+        Promise.race([
+          uploadToS3(files.icon[0], 'icons'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки иконки')), 30000))
+        ]),
+        Promise.race([
+          uploadToS3(files.apk[0], 'apks'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут загрузки APK')), 30000))
+        ])
+      ]);
 
       const [result] = await db.query(
         `INSERT INTO Apps (
@@ -876,10 +922,10 @@ app.post(
 
       logger.info(`Приложение создано пользователем ${user[0].email}: ${name}`);
 
-      await telegramQueue.add({
+      telegramQueue.add({
         chatId: '-1002311447135',
         text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
-      });
+      }, { attempts: 3, backoff: 5000 });
 
       res.status(201).json({
         message: 'Приложение успешно отправлено',
@@ -938,10 +984,10 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     if (status !== 'pending') {
       const [appUser] = await db.query('SELECT email, telegramId FROM Users WHERE id = ?', [app[0].userId]);
       if (appUser[0].telegramId) {
-        await telegramQueue.add({
+        telegramQueue.add({
           chatId: appUser[0].telegramId,
           text: `Статус приложения ${app[0].name} обновлен на ${status} для пользователя ${appUser[0].email}`,
-        });
+        }, { attempts: 3, backoff: 5000 });
       }
     }
 
@@ -972,7 +1018,7 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     }
     if (app[0].apkPath) {
       const apkKey = app[0].apkPath.split('/').pop();
-      if (apkKey) await deleteFromS3(`apks/${iconKey}`);
+      if (apkKey) await deleteFromS3(`apks/${apkKey}`);
     }
 
     await db.query('DELETE FROM Apps WHERE id = ?', [id]);
@@ -1041,12 +1087,12 @@ app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
     logger.info(`Статус верификации пользователя ${user[0].email} обновлен на ${isVerified}`);
 
     if (user[0].telegramId) {
-      await telegramQueue.add({
+      telegramQueue.add({
         chatId: user[0].telegramId,
         text: isVerified 
           ? `Поздравляем, ${user[0].name}! Ваш аккаунт успешно верифицирован.` 
           : `Уважаемый ${user[0].name}, ваш аккаунт не прошел верификацию. Пожалуйста, загрузите корректные документы.`,
-      });
+      }, { attempts: 3, backoff: 5000 });
     }
 
     res.json({ message: `Статус верификации обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}` });
@@ -1101,12 +1147,12 @@ app.put('/api/admin/users/:id/block', authenticateToken, async (req, res) => {
     logger.info(`Статус блокировки пользователя ${user[0].email} обновлен на ${isBlocked}`);
 
     if (user[0].telegramId) {
-      await telegramQueue.add({
+      telegramQueue.add({
         chatId: user[0].telegramId,
         text: isBlocked 
           ? 'Ваш аккаунт был заблокирован. Свяжитесь с администратором.' 
           : 'Ваш аккаунт разблокирован.',
-      });
+      }, { attempts: 3, backoff: 5000 });
     }
 
     res.json({ message: `Пользователь ${isBlocked ? 'заблокирован' : 'разблокирован'}` });
@@ -1135,11 +1181,16 @@ app.post('/api/admin/notify-all', authenticateToken, async (req, res) => {
     let errorCount = 0;
 
     for (const user of users) {
-      await telegramQueue.add({
-        chatId: user.telegramId,
-        text: message,
-      }, { attempts: 3, backoff: 5000 }); // 3 попытки с задержкой 5 секунд
-      successCount++;
+      try {
+        await telegramQueue.add({
+          chatId: user.telegramId,
+          text: message,
+        }, { attempts: 3, backoff: 5000 });
+        successCount++;
+      } catch (err) {
+        errorCount++;
+        logger.error(`Ошибка отправки уведомления пользователю ${user.email}: ${err.message}`);
+      }
     }
 
     logger.info(`Массовая рассылка завершена: успешно запланировано ${successCount}, ошибок ${errorCount}`);
@@ -1161,8 +1212,8 @@ app.use((err, req, res, next) => {
     logger.warn(`Ошибка Multer: ${err.message}`);
     return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
   }
-  if (err.message.includes('Разрешены только')) {
-    logger.warn(`Ошибка типа файла: ${err.message}`);
+  if (err.message.includes('Разрешены только') || err.message.includes('Таймаут загрузки')) {
+    logger.warn(`Ошибка типа файла или таймаута: ${err.message}`);
     return res.status(400).json({ message: err.message });
   }
   res.status(500).json({ message: 'Ошибка сервера', error: err.message });
@@ -1171,9 +1222,13 @@ app.use((err, req, res, next) => {
 // Грациозное завершение работы
 async function shutdown() {
   logger.info('Выполняется грациозное завершение работы...');
-  await telegramQueue.close();
-  await db.end();
-  logger.info('Соединение с базой данных и очередью закрыто');
+  try {
+    await telegramQueue.close();
+    await db.end();
+    logger.info('Соединение с базой данных и очередью закрыто');
+  } catch (err) {
+    logger.error(`Ошибка при завершении работы: ${err.message}`);
+  }
   process.exit(0);
 }
 
