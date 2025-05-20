@@ -14,7 +14,7 @@ const axios = require('axios');
 
 const app = express();
 
-// Конфигурация (используем environment variables)
+// Конфигурация
 require('dotenv').config();
 const JWT_SECRET = process.env.JWT_SECRET || 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
 const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
@@ -27,7 +27,7 @@ const PORT = process.env.PORT || 5000;
 const BUCKET_NAME = process.env.BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
-// Проверка обязательных переменных окружения
+// Проверка переменных окружения
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
@@ -66,6 +66,7 @@ async function checkS3Connection() {
   try {
     await s3Client.send(new ListBucketsCommand({}));
     logger.info('Соединение с S3 успешно');
+    return true;
   } catch (err) {
     logger.error(`Ошибка соединения с S3: ${err.message}, стек: ${err.stack}`);
     throw err;
@@ -77,10 +78,11 @@ app.use(helmet());
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'multipart/form-data'],
   exposedHeaders: ['Authorization'],
 }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Пул соединений с MySQL
 const db = mysql.createPool({
@@ -93,7 +95,7 @@ const db = mysql.createPool({
   connectTimeout: 30000,
 });
 
-// Настройка Multer для загрузки файлов с улучшенным логированием
+// Настройка Multer
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -103,11 +105,9 @@ const upload = multer({
       const validExtensions = /\.png$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
-      console.log(`Icon upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
-      if (extname && mimetype) {
-        return cb(null, true);
-      }
-      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}. Разрешены только файлы PNG!`);
+      logger.info(`Icon upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
+      if (extname && mimetype) return cb(null, true);
+      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Разрешены только файлы PNG для иконок!'));
     } else if (file.fieldname === 'apk') {
       const extname = file.originalname.toLowerCase().endsWith('.apk');
@@ -118,11 +118,8 @@ const upload = multer({
         'application/zip',
       ];
       const mimetype = validMimeTypes.includes(file.mimetype);
-      console.log(`APK upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
-      if (extname && mimetype) {
-        logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
-        return cb(null, true);
-      }
+      logger.info(`APK upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
+      if (extname && mimetype) return cb(null, true);
       logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Разрешены только файлы APK!'));
     } else if (file.fieldname === 'documents') {
@@ -130,10 +127,8 @@ const upload = multer({
       const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
-      console.log(`Document upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
-      if (extname && mimetype) {
-        return cb(null, true);
-      }
+      logger.info(`Document upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
+      if (extname && mimetype) return cb(null, true);
       logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
     } else {
@@ -227,10 +222,7 @@ const authenticateToken = (req, res, next) => {
     next();
   } catch (error) {
     logger.error(`Ошибка проверки токена для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
-    return res.status(403).json({ 
-      message: 'Недействительный или истекший токен', 
-      error: error.message 
-    });
+    return res.status(403).json({ message: 'Недействительный или истекший токен', error: error.message });
   }
 };
 
@@ -240,9 +232,7 @@ const optionalAuthenticateToken = (req, res, next) => {
   const token = authHeader && authHeader.split(' ')[1];
   if (token) {
     jwt.verify(token, JWT_SECRET, (err, user) => {
-      if (!err) {
-        req.user = user;
-      }
+      if (!err) req.user = user;
       next();
     });
   } else {
@@ -256,7 +246,6 @@ async function initializeDatabase() {
     const connection = await db.getConnection();
     logger.info('Подключение к MySQL выполнено');
 
-    // Создание таблицы Users с полем verificationStatus
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -281,7 +270,6 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица Users проверена/создана');
 
-    // Создание таблицы PreRegisters
     await connection.query(`
       CREATE TABLE IF NOT EXISTS PreRegisters (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -292,7 +280,6 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица PreRegisters проверена/создана');
 
-    // Создание таблицы Apps
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Apps (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -310,7 +297,6 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица Apps проверена/создана');
 
-    // Создание администратора по умолчанию
     const [users] = await connection.query("SELECT * FROM Users WHERE email = ?", ['admin@24webstudio.ru']);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash('admin123', 10);
@@ -345,7 +331,6 @@ async function initializeServer() {
 }
 
 // Публичные маршруты
-// Получение списка одобренных приложений
 app.get('/api/public/apps', async (req, res) => {
   try {
     const [apps] = await db.query(`
@@ -361,7 +346,6 @@ app.get('/api/public/apps', async (req, res) => {
   }
 });
 
-// Получение изображения приложения
 app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
   try {
@@ -374,12 +358,9 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
   }
 });
 
-// Предрегистрация пользователя
 app.post(
   '/api/pre-register',
-  [
-    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
-  ],
+  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -405,7 +386,8 @@ app.post(
               chat_id: '-1002311447135',
               text: `Новая предрегистрация: ${email}`,
               parse_mode: 'Markdown',
-            }
+            },
+            { timeout: 5000 }
           );
           logger.info(`Уведомление в Telegram отправлено для ${email}`);
         } catch (telegramErr) {
@@ -421,7 +403,6 @@ app.post(
   }
 );
 
-// Регистрация пользователя
 app.post(
   '/api/auth/register',
   upload,
@@ -448,10 +429,19 @@ app.post(
 
       const [existingUser] = await db.query('SELECT email FROM Users WHERE email = ?', [email]);
       if (existingUser.length > 0) {
+        logger.warn(`Попытка регистрации существующего email: ${email}`);
         return res.status(400).json({ message: 'Email уже зарегистрирован' });
       }
 
-      const documentUrls = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
+      const documentUrls = await Promise.all(
+        req.files.documents.map(file =>
+          uploadToS3(file, 'documents').catch(err => {
+            logger.error(`Ошибка загрузки документа в S3: ${err.message}`);
+            throw new Error(`Ошибка загрузки документа: ${err.message}`);
+          })
+        )
+      );
+
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -479,7 +469,8 @@ app.post(
               chat_id: '-1002311447135',
               text: `Новый запрос на верификацию от ${email}. Документы: ${JSON.stringify(documentUrls)}`,
               parse_mode: 'Markdown',
-            }
+            },
+            { timeout: 5000 }
           );
           logger.info(`Уведомление в Telegram отправлено для верификации ${email}`);
         } catch (telegramErr) {
@@ -494,12 +485,11 @@ app.post(
       });
     } catch (error) {
       logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      res.status(500).json({ message: 'Ошибка сервера при регистрации', error: error.message });
     }
   }
 );
 
-// Вход пользователя
 app.post(
   '/api/auth/login',
   [
@@ -533,11 +523,11 @@ app.post(
       logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
         token,
-        user: { 
-          id: user[0].id, 
-          email: user[0].email, 
-          accountType: user[0].accountType, 
-          name: user[0].name, 
+        user: {
+          id: user[0].id,
+          email: user[0].email,
+          accountType: user[0].accountType,
+          name: user[0].name,
           phone: user[0].phone,
           isVerified: user[0].isVerified,
           verificationStatus: user[0].verificationStatus
@@ -546,12 +536,11 @@ app.post(
       });
     } catch (error) {
       logger.error(`Ошибка входа: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      res.status(500).json({ message: 'Ошибка сервера при входе', error: error.message });
     }
   }
 );
 
-// Запрос на сброс пароля
 app.post(
   '/api/auth/forgot-password',
   [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
@@ -585,7 +574,6 @@ app.post(
   }
 );
 
-// Выполнение сброса пароля
 app.post(
   '/api/auth/reset-password/:token',
   [
@@ -635,7 +623,6 @@ app.post(
   }
 );
 
-// Получение профиля пользователя
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query(
@@ -651,9 +638,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
     try {
       if (user[0].documents) {
         documents = typeof user[0].documents === 'string' ? JSON.parse(user[0].documents) : user[0].documents;
-        if (!Array.isArray(documents)) {
-          documents = [documents];
-        }
+        if (!Array.isArray(documents)) documents = [documents];
       }
       logger.info(`Документы пользователя ${user[0].email}: ${JSON.stringify(documents)}`);
     } catch (parseError) {
@@ -669,7 +654,6 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление документов пользователя
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -691,9 +675,7 @@ app.post(
       let currentDocuments = [];
       try {
         currentDocuments = user[0].documents ? JSON.parse(user[0].documents) : [];
-        if (!Array.isArray(currentDocuments)) {
-          currentDocuments = [currentDocuments];
-        }
+        if (!Array.isArray(currentDocuments)) currentDocuments = [currentDocuments];
       } catch (parseError) {
         logger.error(`Ошибка парсинга текущих документов для пользователя ${user[0].email}: ${parseError.message}`);
         currentDocuments = [];
@@ -714,7 +696,8 @@ app.post(
               chat_id: '-1002311447135',
               text: `Новый запрос на верификацию документов от ${user[0].email}. Документы: ${JSON.stringify(updatedDocuments)}`,
               parse_mode: 'Markdown',
-            }
+            },
+            { timeout: 5000 }
           );
           logger.info(`Уведомление в Telegram отправлено для верификации ${user[0].email}`);
         } catch (telegramErr) {
@@ -722,8 +705,8 @@ app.post(
         }
       }
 
-      res.status(200).json({ 
-        message: 'Документы успешно отправлены на проверку', 
+      res.status(200).json({
+        message: 'Документы успешно отправлены на проверку',
         documents: updatedDocuments,
         verificationStatus: 'pending',
         isVerified: false
@@ -735,7 +718,6 @@ app.post(
   }
 );
 
-// Создание приложения
 app.post(
   '/api/apps/create',
   authenticateToken,
@@ -796,7 +778,8 @@ app.post(
               chat_id: '-1002311447135',
               text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
               parse_mode: 'Markdown',
-            }
+            },
+            { timeout: 5000 }
           );
           logger.info(`Уведомление в Telegram отправлено для приложения ${name}`);
         } catch (telegramErr) {
@@ -815,7 +798,6 @@ app.post(
   }
 );
 
-// Получение списка приложений пользователя
 app.get('/api/apps', authenticateToken, async (req, res) => {
   try {
     const [apps] = await db.query(
@@ -829,7 +811,6 @@ app.get('/api/apps', authenticateToken, async (req, res) => {
   }
 });
 
-// Удаление приложения
 app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
@@ -864,8 +845,6 @@ app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Админ-маршруты
-// Получение списка пользователей для верификации
 app.get('/api/admin/users', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -887,7 +866,6 @@ app.get('/api/admin/users', authenticateToken, async (req, res) => {
   }
 });
 
-// Верификация пользователя администратором
 app.put('/api/admin/verify-user/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { verificationStatus } = req.body;
@@ -929,7 +907,8 @@ app.put('/api/admin/verify-user/:id', authenticateToken, async (req, res) => {
             chat_id: '-1002311447135',
             text: `Статус верификации пользователя ${targetUser[0].email} обновлен на ${verificationStatus}`,
             parse_mode: 'Markdown',
-          }
+          },
+          { timeout: 5000 }
         );
         logger.info(`Уведомление в Telegram отправлено для верификации ${targetUser[0].email}`);
       } catch (telegramErr) {
@@ -944,7 +923,6 @@ app.put('/api/admin/verify-user/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Получение списка приложений для админа
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -966,7 +944,6 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление статуса приложения
 app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -1000,7 +977,8 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
             chat_id: '-1002311447135',
             text: `Статус приложения ${app[0].name} обновлен на ${status} для пользователя ${appUser[0].email}`,
             parse_mode: 'Markdown',
-          }
+          },
+          { timeout: 5000 }
         );
         logger.info(`Уведомление в Telegram отправлено для приложения ${app[0].name}`);
       } catch (telegramErr) {
@@ -1015,7 +993,6 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Удаление приложения админом
 app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
@@ -1051,7 +1028,6 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Обработка ошибок
 app.use((err, req, res, next) => {
   logger.error(`Необработанная ошибка: ${err.message}, стек: ${err.stack}, маршрут: ${req.originalUrl}`);
   if (err instanceof multer.MulterError) {
@@ -1065,7 +1041,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Ошибка сервера', error: err.message });
 });
 
-// Грациозное завершение работы
 async function shutdown() {
   logger.info('Выполняется грациозное завершение работы...');
   await db.end();
@@ -1076,5 +1051,4 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Запуск сервера
 initializeServer();
