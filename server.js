@@ -14,24 +14,24 @@ const axios = require('axios');
 
 const app = express();
 
-// Конфигурация
-const JWT_SECRET = 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
-const DB_HOST = 'vh438.timeweb.ru';
-const DB_USER = 'ch79145_project';
-const DB_PASSWORD = 'Vasya11091109';
-const DB_NAME = 'ch79145_project';
-const S3_ACCESS_KEY = 'DN1NLZTORA2L6NZ529JJ';
-const S3_SECRET_KEY = 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
-const PORT = 5000;
-const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+// Конфигурация (используем environment variables)
+require('dotenv').config();
+const JWT_SECRET = process.env.JWT_SECRET || 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
+const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
+const DB_USER = process.env.DB_USER || 'ch79145_project';
+const DB_PASSWORD = process.env.DB_PASSWORD || 'Vasya11091109';
+const DB_NAME = process.env.DB_NAME || 'ch79145_project';
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'DN1NLZTORA2L6NZ529JJ';
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
+const PORT = process.env.PORT || 5000;
+const BUCKET_NAME = process.env.BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // Проверка обязательных переменных окружения
-const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'];
+const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME'];
 for (const envVar of requiredEnvVars) {
-  const value = eval(envVar);
-  if (!value || value === `YOUR_${envVar}`) {
-    console.error(`Ошибка: ${envVar} не установлен или имеет значение по умолчанию`);
+  if (!process.env[envVar]) {
+    console.error(`Ошибка: ${envVar} не установлен в переменных окружения`);
     process.exit(1);
   }
 }
@@ -164,7 +164,7 @@ async function uploadToS3(file, folder) {
     });
     await upload.done();
     const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
-    logger.info(`Файл загружен в S3: ${key}`);
+    logger.info(`Файл загружен в S3: ${key}, URL: ${location}`);
     return location;
   } catch (error) {
     logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}, стек: ${error.stack}`);
@@ -353,7 +353,7 @@ app.get('/api/public/apps', async (req, res) => {
     res.json(apps);
   } catch (err) {
     logger.error(`Ошибка получения приложений: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ error: 'Ошибка сервера: ' + err.message });
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -366,7 +366,7 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
     image.Body.pipe(res);
   } catch (err) {
     logger.error(`Ошибка получения изображения: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ error: 'Ошибка получения изображения: ' + err.message });
+    res.status(500).json({ message: 'Ошибка получения изображения', error: err.message });
   }
 });
 
@@ -466,10 +466,10 @@ app.post(
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
-      logger.info(`Пользователь зарегистрирован: ${email}`);
+      logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
       res.status(201).json({
         message: 'Регистрация успешна',
-        token: authToken, // Возвращаем токен
+        token: authToken,
         user: { id: result.insertId, email, accountType, name, phone },
       });
     } catch (error) {
@@ -513,7 +513,7 @@ app.post(
 
       logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
-        token, // Возвращаем токен
+        token,
         user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone },
         message: 'Вход успешен',
       });
@@ -619,7 +619,24 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
       logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
       return res.status(404).json({ message: 'Пользователь не найден' });
     }
-    user[0].documents = JSON.parse(user[0].documents || '[]');
+
+    // Безопасное парсинг документов
+    let documents = [];
+    try {
+      if (user[0].documents) {
+        documents = typeof user[0].documents === 'string' ? JSON.parse(user[0].documents) : user[0].documents;
+        if (!Array.isArray(documents)) {
+          // Если documents - строка (например, URL), преобразуем в массив
+          documents = [documents];
+        }
+      }
+      logger.info(`Документы пользователя ${user[0].email}: ${JSON.stringify(documents)}`);
+    } catch (parseError) {
+      logger.error(`Ошибка парсинга документов для пользователя ${user[0].email}: ${parseError.message}, documents: ${user[0].documents}`);
+      documents = []; // Возвращаем пустой массив в случае ошибки
+    }
+
+    user[0].documents = documents;
     res.status(200).json(user[0]);
   } catch (error) {
     logger.error(`Ошибка получения профиля: ${error.message}, стек: ${error.stack}`);
@@ -646,13 +663,23 @@ app.post(
       }
 
       const newDocuments = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
-      const currentDocuments = JSON.parse(user[0].documents || '[]');
+      let currentDocuments = [];
+      try {
+        currentDocuments = user[0].documents ? JSON.parse(user[0].documents) : [];
+        if (!Array.isArray(currentDocuments)) {
+          currentDocuments = [currentDocuments];
+        }
+      } catch (parseError) {
+        logger.error(`Ошибка парсинга текущих документов для пользователя ${user[0].email}: ${parseError.message}`);
+        currentDocuments = [];
+      }
+
       const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
       await db.query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
         JSON.stringify(updatedDocuments), true, user[0].id
       ]);
 
-      logger.info(`Документы обновлены для пользователя ${user[0].email}`);
+      logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
       res.status(200).json({ message: 'Документы успешно обновлены', documents: updatedDocuments });
     } catch (error) {
       logger.error(`Ошибка обновления документов: ${error.message}, стек: ${error.stack}`);
@@ -759,7 +786,7 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
     res.json(apps);
   } catch (err) {
     logger.error(`Ошибка получения приложений для админа: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ error: 'Ошибка сервера: ' + err.message });
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -806,7 +833,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     res.json({ message: `Статус приложения обновлен на ${status}` });
   } catch (err) {
     logger.error(`Ошибка обновления приложения: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ error: 'Ошибка сервера: ' + err.message });
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -825,8 +852,14 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Приложение не найдено' });
     }
 
-    if (app[0].iconPath) await deleteFromS3(app[0].iconPath.split('/').pop());
-    if (app[0].apkPath) await deleteFromS3(app[0].apkPath.split('/').pop());
+    if (app[0].iconPath) {
+      const iconKey = app[0].iconPath.split('/').pop();
+      if (iconKey) await deleteFromS3(iconKey);
+    }
+    if (app[0].apkPath) {
+      const apkKey = app[0].apkPath.split('/').pop();
+      if (apkKey) await deleteFromS3(apkKey);
+    }
 
     await db.query('DELETE FROM Apps WHERE id = ?', [id]);
     logger.info(`Приложение ${id} удалено`);
@@ -834,7 +867,7 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     res.json({ message: 'Приложение удалено' });
   } catch (err) {
     logger.error(`Ошибка удаления приложения: ${err.message}, стек: ${err.stack}`);
-    res.status(500).json({ error: 'Ошибка сервера: ' + err.message });
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
