@@ -16,23 +16,22 @@ const app = express();
 
 // Configuration (using environment variables)
 require('dotenv').config();
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
-const DB_HOST = process.env.DB_HOST || 'your_db_host';
-const DB_USER = process.env.DB_USER || 'your_db_user';
-const DB_PASSWORD = process.env.DB_PASSWORD || 'your_db_password';
-const DB_NAME = process.env.DB_NAME || 'your_db_name';
-const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'your_s3_access_key';
-const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'your_s3_secret_key';
+const JWT_SECRET = process.env.JWT_SECRET || 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
+const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
+const DB_USER = process.env.DB_USER || 'ch79145_project';
+const DB_PASSWORD = process.env.DB_PASSWORD || 'Vasya11091109';
+const DB_NAME = process.env.DB_NAME || 'ch79145_project';
+const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY || 'DN1NLZTORA2L6NZ529JJ';
+const S3_SECRET_KEY = process.env.S3_SECRET_KEY || 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8';
 const PORT = process.env.PORT || 5000;
-const BUCKET_NAME = process.env.BUCKET_NAME || 'your_bucket_name';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'your_telegram_bot_token';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://your-frontend.com';
+const BUCKET_NAME = process.env.BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // Check required environment variables
-const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME', 'TELEGRAM_BOT_TOKEN', 'FRONTEND_URL'];
+const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
-    console.error(`Error: ${envVar} is not set in environment variables`);
+    console.error(`Ошибка: ${envVar} не установлен в переменных окружения`);
     process.exit(1);
   }
 }
@@ -66,9 +65,9 @@ const s3Client = new S3Client({
 async function checkS3Connection() {
   try {
     await s3Client.send(new ListBucketsCommand({}));
-    logger.info('S3 connection successful');
+    logger.info('Соединение с S3 успешно');
   } catch (err) {
-    logger.error(`S3 connection error: ${err.message}, stack: ${err.stack}`);
+    logger.error(`Ошибка соединения с S3: ${err.message}, стек: ${err.stack}`);
     throw err;
   }
 }
@@ -104,11 +103,12 @@ const upload = multer({
       const validExtensions = /\.png$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
+      console.log(`Icon upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
         return cb(null, true);
       }
-      logger.warn(`Invalid icon: name=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Only PNG files are allowed for icons!'));
+      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}. Разрешены только файлы PNG!`);
+      cb(new Error('Разрешены только файлы PNG для иконок!'));
     } else if (file.fieldname === 'apk') {
       const extname = file.originalname.toLowerCase().endsWith('.apk');
       const validMimeTypes = [
@@ -118,24 +118,27 @@ const upload = multer({
         'application/zip',
       ];
       const mimetype = validMimeTypes.includes(file.mimetype);
+      console.log(`APK upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
+        logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
-      logger.warn(`Invalid APK: name=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Only APK files are allowed!'));
+      logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Разрешены только файлы APK!'));
     } else if (file.fieldname === 'documents') {
       const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
       const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
+      console.log(`Document upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
         return cb(null, true);
       }
-      logger.warn(`Invalid document: name=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed for documents!'));
+      logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
     } else {
-      logger.warn(`Invalid field name: ${file.fieldname}`);
-      cb(new Error('Invalid field name!'));
+      logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
+      cb(new Error('Недопустимое имя поля!'));
     }
   },
 }).fields([
@@ -164,11 +167,11 @@ async function uploadToS3(file, folder) {
     });
     await upload.done();
     const location = `https://s3.twcstorage.ru/${BUCKET_NAME}/${key}`;
-    logger.info(`File uploaded to S3: ${key}, URL: ${location}`);
+    logger.info(`Файл загружен в S3: ${key}, URL: ${location}`);
     return location;
   } catch (error) {
-    logger.error(`S3 upload error for ${key}: ${error.message}, stack: ${error.stack}`);
-    throw new Error(`S3 upload error: ${error.message}`);
+    logger.error(`Ошибка загрузки в S3 для ${key}: ${error.message}, стек: ${error.stack}`);
+    throw new Error(`Ошибка загрузки в S3: ${error.message}`);
   }
 }
 
@@ -181,9 +184,9 @@ async function deleteFromS3(key) {
 
   try {
     await s3Client.send(new DeleteObjectCommand(params));
-    logger.info(`File deleted from S3: ${key}`);
+    logger.info(`Файл удален из S3: ${key}`);
   } catch (err) {
-    logger.error(`S3 delete error: ${err.message}, stack: ${err.stack}`);
+    logger.error(`Ошибка удаления из S3: ${err.message}, стек: ${err.stack}`);
     throw err;
   }
 }
@@ -200,7 +203,7 @@ async function getFromS3(key) {
     const data = await s3Client.send(command);
     return data;
   } catch (err) {
-    logger.error(`S3 get error: ${err.message}, stack: ${err.stack}`);
+    logger.error(`Ошибка получения из S3: ${err.message}, стек: ${err.stack}`);
     throw err;
   }
 }
@@ -210,23 +213,23 @@ const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
-    logger.warn(`No authorization token for route: ${req.originalUrl}`);
-    return res.status(401).json({ message: 'Authorization token required' });
+    logger.warn(`Отсутствует токен авторизации для маршрута: ${req.originalUrl}`);
+    return res.status(401).json({ message: 'Требуется токен авторизации' });
   }
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     if (!decoded.id || !decoded.email) {
-      logger.warn(`Token missing id or email: ${JSON.stringify(decoded)}`);
-      return res.status(403).json({ message: 'Invalid token: missing required data' });
+      logger.warn(`Токен не содержит id или email: ${JSON.stringify(decoded)}`);
+      return res.status(403).json({ message: 'Недействительный токен: отсутствуют необходимые данные' });
     }
     req.user = decoded;
-    logger.info(`Token verified: id=${decoded.id}, email=${decoded.email}, route: ${req.originalUrl}`);
+    logger.info(`Токен проверен: id=${decoded.id}, email=${decoded.email}, маршрут: ${req.originalUrl}`);
     next();
   } catch (error) {
-    logger.error(`Token verification error for route ${req.originalUrl}: ${error.message}, stack: ${error.stack}`);
-    return res.status(403).json({
-      message: 'Invalid or expired token',
-      error: error.message,
+    logger.error(`Ошибка проверки токена для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
+    return res.status(403).json({ 
+      message: 'Недействительный или истекший токен', 
+      error: error.message 
     });
   }
 };
@@ -251,7 +254,7 @@ const optionalAuthenticateToken = (req, res, next) => {
 async function initializeDatabase() {
   try {
     const connection = await db.getConnection();
-    logger.info('MySQL connection established');
+    logger.info('Подключение к MySQL выполнено');
 
     // Create Users table
     await connection.query(`
@@ -262,24 +265,20 @@ async function initializeDatabase() {
         accountType ENUM('individual', 'commercial') NOT NULL,
         name VARCHAR(255) NOT NULL,
         phone VARCHAR(20) NOT NULL,
-        telegramUsername VARCHAR(255),
         addressStreet VARCHAR(255),
         addressCity VARCHAR(255),
         addressCountry VARCHAR(255),
         addressPostalCode VARCHAR(20),
         documents JSON,
         isVerified BOOLEAN DEFAULT FALSE,
-        isBlocked BOOLEAN DEFAULT FALSE,
         jwtToken VARCHAR(500),
         resetPasswordToken VARCHAR(500),
         resetPasswordExpires DATETIME,
-        verificationToken VARCHAR(500),
-        verificationExpires DATETIME,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-    logger.info('Users table checked/created');
+    logger.info('Таблица Users проверена/создана');
 
     // Create PreRegisters table
     await connection.query(`
@@ -290,7 +289,7 @@ async function initializeDatabase() {
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-    logger.info('PreRegisters table checked/created');
+    logger.info('Таблица PreRegisters проверена/создана');
 
     // Create Apps table
     await connection.query(`
@@ -308,7 +307,7 @@ async function initializeDatabase() {
         FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
       )
     `);
-    logger.info('Apps table checked/created');
+    logger.info('Таблица Apps проверена/создана');
 
     // Create Advertisements table
     await connection.query(`
@@ -320,14 +319,11 @@ async function initializeDatabase() {
         status ENUM('active', 'paused', 'completed') DEFAULT 'active',
         impressions INT DEFAULT 0,
         clicks INT DEFAULT 0,
-        endDate DATE,
-        userId INT NOT NULL,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-    logger.info('Advertisements table checked/created');
+    logger.info('Таблица Advertisements проверена/создана');
 
     // Create default admin
     const [users] = await connection.query("SELECT * FROM Users WHERE email = ?", ['admin@24webstudio.ru']);
@@ -337,112 +333,17 @@ async function initializeDatabase() {
         "INSERT INTO Users (email, password, accountType, name, phone, isVerified) VALUES (?, ?, ?, ?, ?, ?)",
         ['admin@24webstudio.ru', hashedPassword, 'commercial', 'Admin', '1234567890', true]
       );
-      logger.info('Admin created: admin@24webstudio.ru / admin123');
+      logger.info('Админ создан: admin@24webstudio.ru / admin123');
     } else {
-      logger.info('Admin already exists: admin@24webstudio.ru');
+      logger.info('Админ уже существует: admin@24webstudio.ru');
     }
 
     connection.release();
   } catch (err) {
-    logger.error(`Database initialization error: ${err.message}, stack: ${err.stack}`);
+    logger.error(`Ошибка инициализации базы данных: ${err.message}, стек: ${err.stack}`);
     throw err;
   }
 }
-
-// Telegram Bot Setup
-const TelegramBot = require('node-telegram-bot-api');
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-
-// Function to resolve Telegram username to chat ID
-async function resolveTelegramUsername(username) {
-  try {
-    const response = await axios.get(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat`, {
-      params: { chat_id: username },
-    });
-    if (response.data.ok) {
-      return response.data.result.id;
-    }
-    return null;
-  } catch (error) {
-    logger.error(`Error resolving chat_id for ${username}: ${error.message}`);
-    return null;
-  }
-}
-
-// Telegram Bot Commands
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Welcome! Use the following commands to manage your account:\n' +
-    '/status - Check verification status\n' +
-    '/verify <code> - Verify your account\n' +
-    '/delete - Request account deletion');
-});
-
-bot.onText(/\/status/, async (msg) => {
-  const chatId = msg.chat.id;
-  const username = `@${msg.from.username}`;
-  try {
-    const [user] = await db.query('SELECT email, isVerified, isBlocked FROM Users WHERE telegramUsername = ?', [username]);
-    if (!user.length) {
-      bot.sendMessage(chatId, 'Account not found. Please register with this Telegram username.');
-      return;
-    }
-    const status = user[0].isVerified ? 'Verified' : 'Awaiting verification';
-    const blockStatus = user[0].isBlocked ? 'Blocked' : 'Active';
-    bot.sendMessage(chatId, `Your account (${user[0].email}):\nStatus: ${status}\nBlock status: ${blockStatus}`);
-  } catch (error) {
-    logger.error(`Error checking status for ${username}: ${error.message}`);
-    bot.sendMessage(chatId, 'Server error. Please try again later.');
-  }
-});
-
-bot.onText(/\/verify (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const username = `@${msg.from.username}`;
-  const code = match[1];
-  try {
-    const [user] = await db.query('SELECT id, email, verificationToken FROM Users WHERE telegramUsername = ? AND verificationToken = ?', [username, code]);
-    if (!user.length) {
-      bot.sendMessage(chatId, 'Invalid verification code or account not found.');
-      return;
-    }
-    await db.query('UPDATE Users SET isVerified = ?, verificationToken = NULL, verificationExpires = NULL WHERE id = ?', [true, user[0].id]);
-    bot.sendMessage(chatId, `Account ${user[0].email} successfully verified!`);
-    logger.info(`User ${user[0].email} verified via Telegram`);
-  } catch (error) {
-    logger.error(`Error verifying via Telegram for ${username}: ${error.message}`);
-    bot.sendMessage(chatId, 'Server error. Please try again later.');
-  }
-});
-
-bot.onText(/\/delete/, async (msg) => {
-  const chatId = msg.chat.id;
-  const username = `@${msg.from.username}`;
-  try {
-    const [user] = await db.query('SELECT id, email, documents FROM Users WHERE telegramUsername = ?', [username]);
-    if (!user.length) {
-      bot.sendMessage(chatId, 'Account not found.');
-      return;
-    }
-    let documents = [];
-    try {
-      documents = user[0].documents ? JSON.parse(user[0].documents) : [];
-      if (!Array.isArray(documents)) documents = [documents];
-    } catch (parseError) {
-      logger.error(`Error parsing documents for ${user[0].email}: ${parseError.message}`);
-    }
-    for (const doc of documents) {
-      const docKey = doc.split('/').pop();
-      if (docKey) await deleteFromS3(`documents/${docKey}`);
-    }
-    await db.query('DELETE FROM Users WHERE id = ?', [user[0].id]);
-    bot.sendMessage(chatId, `Account ${user[0].email} successfully deleted.`);
-    logger.info(`Account ${user[0].email} deleted via Telegram`);
-  } catch (error) {
-    logger.error(`Error deleting account for ${username}: ${error.message}`);
-    bot.sendMessage(chatId, 'Server error. Please try again later.');
-  }
-});
 
 // Server initialization
 async function initializeServer() {
@@ -450,10 +351,10 @@ async function initializeServer() {
     await initializeDatabase();
     await checkS3Connection();
     app.listen(PORT, () => {
-      logger.info(`Server started on port ${PORT}`);
+      logger.info(`Сервер запущен на порту ${PORT}`);
     });
   } catch (err) {
-    logger.error(`Server initialization error: ${err.message}, stack: ${err.stack}`);
+    logger.error(`Ошибка инициализации сервера: ${err.message}, стек: ${err.stack}`);
     process.exit(1);
   }
 }
@@ -470,8 +371,8 @@ app.get('/api/public/apps', async (req, res) => {
     `);
     res.json(apps);
   } catch (err) {
-    logger.error(`Error fetching apps: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка получения приложений: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -483,8 +384,8 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
     res.setHeader('Content-Type', image.ContentType || 'image/png');
     image.Body.pipe(res);
   } catch (err) {
-    logger.error(`Error fetching image: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Error fetching image', error: err.message });
+    logger.error(`Ошибка получения изображения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка получения изображения', error: err.message });
   }
 });
 
@@ -492,42 +393,45 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
 app.post(
   '/api/pre-register',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('telegramUsername').optional().matches(/^@[\w\d_]{5,32}$/).withMessage('Invalid Telegram username'),
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
-      const { email, telegramUsername } = req.body;
+      const { email } = req.body;
       const [existing] = await db.query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
       if (existing.length > 0) {
-        return res.status(400).json({ message: 'Email already in waitlist' });
+        return res.status(400).json({ message: 'Email уже в списке ожидания' });
       }
 
       await db.query('INSERT INTO PreRegisters (email) VALUES (?)', [email]);
-      logger.info(`Pre-registration: ${email}`);
+      logger.info(`Предрегистрация: ${email}`);
 
-      if (telegramUsername) {
-        const chatId = await resolveTelegramUsername(telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(chatId, `Thank you for pre-registering, ${email}!`);
-            logger.info(`Telegram notification sent for ${telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${telegramUsername}: ${telegramErr.message}`);
-          }
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новая предрегистрация: ${email}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для ${email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
         }
       }
 
-      res.status(201).json({ message: `Thank you! Your email (${email}) has been added to the waitlist.` });
+      res.status(201).json({ message: `Спасибо! Ваш email (${email}) добавлен в список ожидания.` });
     } catch (error) {
-      logger.error(`Pre-registration error: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка предрегистрации: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
@@ -537,197 +441,118 @@ app.post(
   '/api/auth/register',
   upload,
   [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-    body('accountType').isIn(['individual', 'commercial']).withMessage('Invalid account type'),
-    body('name').notEmpty().trim().withMessage('Name is required'),
-    body('phone').notEmpty().trim().withMessage('Phone number is required'),
-    body('telegramUsername').optional().matches(/^@[\w\d_]{5,32}$/).withMessage('Invalid Telegram username'),
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('password').isLength({ min: 8 }).withMessage('Пароль должен содержать минимум 8 символов'),
+    body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
+    body('name').notEmpty().trim().withMessage('Требуется имя'),
+    body('phone').notEmpty().trim().withMessage('Требуется номер телефона'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
-      const { email, password, accountType, name, phone, telegramUsername, addressStreet, addressCity, addressCountry, addressPostalCode } = req.body;
+      const { email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode } = req.body;
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('No documents uploaded');
-        return res.status(400).json({ message: 'At least one document is required' });
+        logger.warn('Документы не загружены');
+        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
       const [existingUser] = await db.query('SELECT email FROM Users WHERE email = ?', [email]);
       if (existingUser.length > 0) {
-        return res.status(400).json({ message: 'Email already registered' });
+        return res.status(400).json({ message: 'Email уже зарегистрирован' });
       }
 
       const documentUrls = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
-      const verificationToken = jwt.sign({ email, purpose: 'verify' }, JWT_SECRET, { expiresIn: '1h' });
-      const verificationLink = `${FRONTEND_URL}/verify?token=${verificationToken}`;
 
       const [result] = await db.query(
         `INSERT INTO Users (
-          email, password, accountType, name, phone, telegramUsername, addressStreet, addressCity, addressCountry, addressPostalCode,
-          documents, isVerified, verificationToken, verificationExpires
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode,
+          documents, isVerified
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          email, hashedPassword, accountType, name, phone, telegramUsername || null, addressStreet || null, addressCity || null, addressCountry || null,
-          addressPostalCode || null, JSON.stringify(documentUrls), false, verificationToken, new Date(Date.now() + 3600000),
+          email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
+          addressPostalCode || null, JSON.stringify(documentUrls), false
         ]
       );
 
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
-      if (telegramUsername) {
-        const chatId = await resolveTelegramUsername(telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(
-              chatId,
-              `Welcome, ${name}! You have registered with email: ${email}.\n` +
-              `Please verify your account by clicking this link: ${verificationLink}`
-            );
-            logger.info(`Registration notification sent to Telegram for ${telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${telegramUsername}: ${telegramErr.message}`);
-          }
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новые документы для проверки от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для документов пользователя ${email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
         }
       }
 
-      try {
-        await bot.sendMessage(
-          '-1002311447135',
-          `New documents for review from user ${email} (${telegramUsername || 'no Telegram'}). Count: ${documentUrls.length}`
-        );
-        logger.info(`Telegram notification sent for user ${email} documents`);
-      } catch (telegramErr) {
-        logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-      }
-
-      logger.info(`User registered: ${email}, documents: ${JSON.stringify(documentUrls)}`);
+      logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
       res.status(201).json({
-        message: 'Registration successful. Check Telegram for verification link.',
+        message: 'Регистрация успешна. Ожидайте проверки документов администратором.',
         token: authToken,
-        user: { id: result.insertId, email, accountType, name, phone, telegramUsername, isVerified: false },
+        user: { id: result.insertId, email, accountType, name, phone, isVerified: false },
       });
     } catch (error) {
-      logger.error(`Registration error: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
-
-// Verify account via token
-app.get('/api/auth/verify/:token', async (req, res) => {
-  const { token } = req.params;
-  try {
-    let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-      if (decoded.purpose !== 'verify') {
-        return res.status(400).json({ message: 'Invalid verification token' });
-      }
-    } catch (error) {
-      logger.warn(`Invalid verification token: ${error.message}`);
-      return res.status(400).json({ message: 'Invalid or expired verification token' });
-    }
-
-    const [user] = await db.query(
-      'SELECT id, email, telegramUsername FROM Users WHERE email = ? AND verificationToken = ? AND verificationExpires > NOW()',
-      [decoded.email, token]
-    );
-    if (!user.length) {
-      logger.warn(`Invalid or expired verification token for email: ${decoded.email}`);
-      return res.status(400).json({ message: 'Invalid or expired verification token' });
-    }
-
-    await db.query('UPDATE Users SET isVerified = ?, verificationToken = NULL, verificationExpires = NULL WHERE id = ?', [true, user[0].id]);
-
-    if (user[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your account ${user[0].email} has been successfully verified!`);
-          logger.info(`Verification notification sent to Telegram for ${user[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-        }
-      }
-    }
-
-    logger.info(`User ${user[0].email} verified via link`);
-    res.status(200).json({ message: 'Account successfully verified' });
-  } catch (error) {
-    logger.error(`Verification error: ${error.message}, stack: ${error.stack}`);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
 
 // User login
 app.post(
   '/api/auth/login',
   [
-    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-    body('password').notEmpty().withMessage('Password is required'),
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('password').notEmpty().withMessage('Требуется пароль'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const { email, password } = req.body;
       const [user] = await db.query('SELECT * FROM Users WHERE email = ?', [email]);
       if (!user.length) {
-        logger.warn(`Login attempt with non-existent email: ${email}`);
-        return res.status(400).json({ message: 'Invalid email or password' });
+        logger.warn(`Попытка входа с несуществующим email: ${email}`);
+        return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
       const isMatch = await bcrypt.compare(password, user[0].password);
       if (!isMatch) {
-        logger.warn(`Invalid password for email: ${email}`);
-        return res.status(400).json({ message: 'Invalid email or password' });
+        logger.warn(`Неверный пароль для email: ${email}`);
+        return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
       const token = jwt.sign({ id: user[0].id, email: user[0].email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user[0].id]);
 
-      if (user[0].telegramUsername) {
-        const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(chatId, `You have successfully logged into ${email}`);
-            logger.info(`Login notification sent to Telegram for ${user[0].telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-          }
-        }
-      }
-
-      logger.info(`User logged in: ${user[0].email}`);
+      logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
         token,
-        user: {
-          id: user[0].id,
-          email: user[0].email,
-          accountType: user[0].accountType,
-          name: user[0].name,
-          phone: user[0].phone,
-          telegramUsername: user[0].telegramUsername,
-          isVerified: user[0].isVerified,
-        },
-        message: user[0].isVerified ? 'Login successful' : 'Login successful, but account awaits verification',
+        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone, isVerified: user[0].isVerified },
+        message: user[0].isVerified ? 'Вход успешен' : 'Вход успешен, но аккаунт ожидает верификации',
       });
     } catch (error) {
-      logger.error(`Login error: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка входа: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
@@ -735,20 +560,20 @@ app.post(
 // Forgot password
 app.post(
   '/api/auth/forgot-password',
-  [body('email').isEmail().normalizeEmail().withMessage('Valid email is required')],
+  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
       const { email } = req.body;
-      const [user] = await db.query('SELECT id, email, telegramUsername FROM Users WHERE email = ?', [email]);
+      const [user] = await db.query('SELECT id, email FROM Users WHERE email = ?', [email]);
       if (!user.length) {
-        logger.warn(`Password reset attempt for non-existent email: ${email}`);
-        return res.status(404).json({ message: 'User with this email not found' });
+        logger.warn(`Попытка сброса пароля для несуществующего email: ${email}`);
+        return res.status(404).json({ message: 'Пользователь с таким email не найден' });
       }
 
       const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
@@ -757,26 +582,11 @@ app.post(
         [resetToken, new Date(Date.now() + 3600000), email]
       );
 
-      if (user[0].telegramUsername) {
-        const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(
-              chatId,
-              `Password reset request for ${email}. Use this token to reset your password: ${resetToken}`
-            );
-            logger.info(`Password reset notification sent to Telegram for ${user[0].telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-          }
-        }
-      }
-
-      logger.info(`Password reset requested for ${user[0].email}`);
-      res.status(200).json({ message: 'Password reset link sent (check Telegram or email)' });
+      logger.info(`Запрошен сброс пароля для ${user[0].email}`);
+      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку email)' });
     } catch (error) {
-      logger.error(`Password reset error: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
@@ -785,14 +595,14 @@ app.post(
 app.post(
   '/api/auth/reset-password/:token',
   [
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Passwords do not match'),
+    body('password').isLength({ min: 8 }).withMessage('Пароль должен содержать минимум 8 символов'),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Пароли не совпадают'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
@@ -802,17 +612,17 @@ app.post(
       try {
         decoded = jwt.verify(token, JWT_SECRET);
       } catch (error) {
-        logger.warn(`Invalid reset token: ${error.message}, stack: ${error.stack}`);
-        return res.status(400).json({ message: 'Invalid or expired reset token' });
+        logger.warn(`Недействительный токен сброса: ${error.message}, стек: ${error.stack}`);
+        return res.status(400).json({ message: 'Недействительный или истекший токен' });
       }
 
       const [user] = await db.query(
-        'SELECT id, email, telegramUsername FROM Users WHERE email = ? AND resetPasswordToken = ? AND resetPasswordExpires > NOW()',
+        'SELECT id, email FROM Users WHERE email = ? AND resetPasswordToken = ? AND resetPasswordExpires > NOW()',
         [decoded.email, token]
       );
       if (!user.length) {
-        logger.warn(`Invalid or expired reset token for email: ${decoded.email}`);
-        return res.status(400).json({ message: 'Invalid or expired reset token' });
+        logger.warn(`Недействительный или истекший токен сброса для email: ${decoded.email}`);
+        return res.status(400).json({ message: 'Недействительный или истекший токен' });
       }
 
       const salt = await bcrypt.genSalt(10);
@@ -822,23 +632,11 @@ app.post(
         [hashedPassword, decoded.email]
       );
 
-      if (user[0].telegramUsername) {
-        const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(chatId, `Password for ${user[0].email} successfully reset.`);
-            logger.info(`Password reset notification sent to Telegram for ${user[0].telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-          }
-        }
-      }
-
-      logger.info(`Password reset for ${user[0].email}`);
-      res.status(200).json({ message: 'Password successfully reset' });
+      logger.info(`Пароль сброшен для ${user[0].email}`);
+      res.status(200).json({ message: 'Пароль успешно сброшен' });
     } catch (error) {
-      logger.error(`Password reset error: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
@@ -847,12 +645,12 @@ app.post(
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query(
-      'SELECT id, email, accountType, name, phone, telegramUsername, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, isBlocked, createdAt FROM Users WHERE id = ?',
+      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt FROM Users WHERE id = ?',
       [req.user.id]
     );
     if (!user.length) {
-      logger.warn(`User not found for ID: ${req.user.id}`);
-      return res.status(404).json({ message: 'User not found' });
+      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'Пользователь не найден' });
     }
 
     let documents = [];
@@ -863,17 +661,17 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
           documents = [documents];
         }
       }
-      logger.info(`User documents for ${user[0].email}: ${JSON.stringify(documents)}`);
+      logger.info(`Документы пользователя ${user[0].email}: ${JSON.stringify(documents)}`);
     } catch (parseError) {
-      logger.error(`Error parsing documents for user ${user[0].email}: ${parseError.message}, documents: ${user[0].documents}`);
+      logger.error(`Ошибка парсинга документов для пользователя ${user[0].email}: ${parseError.message}, documents: ${user[0].documents}`);
       documents = [];
     }
 
     user[0].documents = documents;
     res.status(200).json(user[0]);
   } catch (error) {
-    logger.error(`Error fetching profile: ${error.message}, stack: ${error.stack}`);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    logger.error(`Ошибка получения профиля: ${error.message}, стек: ${error.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
   }
 });
 
@@ -884,15 +682,15 @@ app.post(
   upload,
   async (req, res) => {
     try {
-      const [user] = await db.query('SELECT id, email, telegramUsername, documents FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, documents FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
-        logger.warn(`User not found for ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'User not found' });
+        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'Пользователь не найден' });
       }
 
       if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('No documents uploaded');
-        return res.status(400).json({ message: 'At least one document is required' });
+        logger.warn('Документы не загружены');
+        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
       }
 
       const newDocuments = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
@@ -903,7 +701,7 @@ app.post(
           currentDocuments = [currentDocuments];
         }
       } catch (parseError) {
-        logger.error(`Error parsing current documents for user ${user[0].email}: ${parseError.message}`);
+        logger.error(`Ошибка парсинга текущих документов для пользователя ${user[0].email}: ${parseError.message}`);
         currentDocuments = [];
       }
 
@@ -912,36 +710,30 @@ app.post(
         JSON.stringify(updatedDocuments), false, user[0].id
       ]);
 
-      if (user[0].telegramUsername) {
-        const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(chatId, `New documents uploaded for ${user[0].email}. Awaiting admin review.`);
-            logger.info(`Document upload notification sent to Telegram for ${user[0].telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-          }
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новые документы для проверки от пользователя ${user[0].email}. Количество: ${newDocuments.length}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для документов пользователя ${user[0].email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
         }
       }
 
-      try {
-        await bot.sendMessage(
-          '-1002311447135',
-          `New documents for review from user ${user[0].email} (${user[0].telegramUsername || 'no Telegram'}). Count: ${newDocuments.length}`
-        );
-        logger.info(`Telegram notification sent for user ${user[0].email} documents`);
-      } catch (telegramErr) {
-        logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-      }
-
-      logger.info(`Documents updated for user ${user[0].email}, new documents: ${JSON.stringify(updatedDocuments)}`);
-      res.status(200).json({
-        message: 'Documents successfully uploaded and awaiting admin review',
-        documents: updatedDocuments,
+      logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
+      res.status(200).json({ 
+        message: 'Документы успешно загружены и ожидают проверки администратором', 
+        documents: updatedDocuments 
       });
     } catch (error) {
-      logger.error(`Error updating documents: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка обновления документов: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
@@ -952,39 +744,39 @@ app.post(
   authenticateToken,
   upload,
   [
-    body('name').notEmpty().trim().withMessage('App name is required'),
-    body('description').notEmpty().trim().withMessage('Description is required'),
-    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category'),
+    body('name').notEmpty().trim().withMessage('Требуется название приложения'),
+    body('description').notEmpty().trim().withMessage('Требуется описание'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Недопустимая категория'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
-      const [user] = await db.query('SELECT id, email, telegramUsername, isVerified FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, isVerified FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
-        logger.warn(`User not found for ID: ${req.user.id}`);
-        return res.status(404).json({ message: 'User not found' });
+        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'Пользователь не найден' });
       }
 
       if (!user[0].isVerified) {
-        logger.warn(`User not verified: ${user[0].email}`);
-        return res.status(403).json({ message: 'Account must be verified to submit apps' });
+        logger.warn(`Пользователь не верифицирован: ${user[0].email}`);
+        return res.status(403).json({ message: 'Аккаунт должен быть верифицирован для отправки приложений' });
       }
 
       const { name, description, category } = req.body;
       const files = req.files;
 
       if (!files || !files.icon || !files.icon[0]) {
-        logger.warn('Icon file missing');
-        return res.status(400).json({ message: 'Icon file required (PNG only)' });
+        logger.warn('Файл иконки отсутствует');
+        return res.status(400).json({ message: 'Требуется файл иконки (только PNG)' });
       }
       if (!files.apk || !files.apk[0]) {
-        logger.warn('APK file missing');
-        return res.status(400).json({ message: 'APK file required' });
+        logger.warn('Файл APK отсутствует');
+        return res.status(400).json({ message: 'Требуется файл APK' });
       }
 
       const iconUrl = await uploadToS3(files.icon[0], 'icons');
@@ -997,36 +789,31 @@ app.post(
         [name, description, category, iconUrl, apkUrl, user[0].id, 'pending']
       );
 
-      if (user[0].telegramUsername) {
-        const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(chatId, `Your app ${name} has been submitted for review.`);
-            logger.info(`App creation notification sent to Telegram for ${user[0].telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-          }
+      logger.info(`Приложение создано пользователем ${user[0].email}: ${name}`);
+
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для приложения ${name}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
         }
       }
 
-      try {
-        await bot.sendMessage(
-          '-1002311447135',
-          `New app submitted: ${name} by ${user[0].email} (${user[0].telegramUsername || 'no Telegram'})`
-        );
-        logger.info(`Telegram notification sent for app ${name}`);
-      } catch (telegramErr) {
-        logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-      }
-
-      logger.info(`App created by user ${user[0].email}: ${name}`);
       res.status(201).json({
-        message: 'App successfully submitted',
+        message: 'Приложение успешно отправлено',
         app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending' },
       });
     } catch (error) {
-      logger.error(`Error creating app: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка создания приложения: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
@@ -1037,7 +824,7 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
     const [apps] = await db.query(`
@@ -1048,8 +835,8 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
     `);
     res.json(apps);
   } catch (err) {
-    logger.error(`Error fetching apps for admin: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка получения приложений для админа: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1061,48 +848,42 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
     if (!['pending', 'approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ message: 'Invalid status' });
+      return res.status(400).json({ message: 'Недопустимый статус' });
     }
 
     const [app] = await db.query('SELECT * FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
-      return res.status(404).json({ message: 'App not found' });
+      return res.status(404).json({ message: 'Приложение не найдено' });
     }
 
     await db.query('UPDATE Apps SET status = ? WHERE id = ?', [status, id]);
+    logger.info(`Статус приложения ${id} обновлен на ${status}`);
 
-    const [appUser] = await db.query('SELECT email, telegramUsername FROM Users WHERE id = ?', [app[0].userId]);
-    if (appUser[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(appUser[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your app ${app[0].name} status updated to ${status}.`);
-          logger.info(`App status update notification sent to Telegram for ${appUser[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${appUser[0].telegramUsername}: ${telegramErr.message}`);
-        }
+    if (status !== 'pending' && TELEGRAM_BOT_TOKEN) {
+      const [appUser] = await db.query('SELECT email FROM Users WHERE id = ?', [app[0].userId]);
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Статус приложения ${app[0].name} обновлен на ${status} для пользователя ${appUser[0].email}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для приложения ${app[0].name}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
       }
     }
 
-    try {
-      await bot.sendMessage(
-        '-1002311447135',
-        `App ${app[0].name} status updated to ${status} for user ${appUser[0].email} (${appUser[0].telegramUsername || 'no Telegram'})`
-      );
-      logger.info(`Telegram notification sent for app ${app[0].name}`);
-    } catch (telegramErr) {
-      logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-    }
-
-    logger.info(`App ${id} status updated to ${status}`);
-    res.json({ message: `App status updated to ${status}` });
+    res.json({ message: `Статус приложения обновлен на ${status}` });
   } catch (err) {
-    logger.error(`Error updating app: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка обновления приложения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1113,12 +894,12 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
-    const [app] = await db.query('SELECT iconPath, apkPath, userId, name FROM Apps WHERE id = ?', [id]);
+    const [app] = await db.query('SELECT iconPath, apkPath FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
-      return res.status(404).json({ message: 'App not found' });
+      return res.status(404).json({ message: 'Приложение не найдено' });
     }
 
     if (app[0].iconPath) {
@@ -1130,26 +911,13 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
       if (apkKey) await deleteFromS3(`apks/${apkKey}`);
     }
 
-    const [appUser] = await db.query('SELECT email, telegramUsername FROM Users WHERE id = ?', [app[0].userId]);
     await db.query('DELETE FROM Apps WHERE id = ?', [id]);
+    logger.info(`Приложение ${id} удалено`);
 
-    if (appUser[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(appUser[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your app ${app[0].name} was deleted by admin.`);
-          logger.info(`App deletion notification sent to Telegram for ${appUser[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${appUser[0].telegramUsername}: ${telegramErr.message}`);
-        }
-      }
-    }
-
-    logger.info(`App ${id} deleted`);
-    res.json({ message: 'App deleted' });
+    res.json({ message: 'Приложение удалено' });
   } catch (err) {
-    logger.error(`Error deleting app: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка удаления приложения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1158,11 +926,11 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
     const [users] = await db.query(`
-      SELECT id, email, name, accountType, documents, isVerified, isBlocked, telegramUsername, createdAt
+      SELECT id, email, name, accountType, documents, isVerified, createdAt
       FROM Users
       WHERE documents IS NOT NULL
       ORDER BY createdAt DESC
@@ -1176,7 +944,7 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
           documents = [documents];
         }
       } catch (parseError) {
-        logger.error(`Error parsing documents for user ${u.email}: ${parseError.message}`);
+        logger.error(`Ошибка парсинга документов для пользователя ${u.email}: ${parseError.message}`);
         documents = [];
       }
       return { ...u, documents };
@@ -1184,8 +952,8 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
 
     res.json(usersWithDocuments);
   } catch (err) {
-    logger.error(`Error fetching user documents for admin: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка получения документов пользователей для админа: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1197,107 +965,41 @@ app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
   try {
     const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
     if (typeof isVerified !== 'boolean') {
-      return res.status(400).json({ message: 'Invalid verification status' });
+      return res.status(400).json({ message: 'Недопустимый статус верификации' });
     }
 
-    const [user] = await db.query('SELECT email, telegramUsername, documents FROM Users WHERE id = ?', [id]);
+    const [user] = await db.query('SELECT email, documents FROM Users WHERE id = ?', [id]);
     if (!user.length) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ message: 'Пользователь не найден' });
     }
 
-    await db.query('UPDATE Users SET isVerified = ?, verificationToken = NULL, verificationExpires = NULL WHERE id = ?', [isVerified, id]);
+    await db.query('UPDATE Users SET isVerified = ? WHERE id = ?', [isVerified, id]);
+    logger.info(`Статус верификации пользователя ${user[0].email} обновлен на ${isVerified}`);
 
-    if (user[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your account ${user[0].email} has been ${isVerified ? 'verified' : 'rejected'}.`);
-          logger.info(`Verification notification sent to Telegram for ${user[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-        }
+    if (TELEGRAM_BOT_TOKEN) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Статус верификации пользователя ${user[0].email} обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для верификации пользователя ${user[0].email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
       }
     }
 
-    try {
-      await bot.sendMessage(
-        '-1002311447135',
-        `User ${user[0].email} (${user[0].telegramUsername || 'no Telegram'}) verification status updated to ${isVerified ? 'verified' : 'not verified'}`
-      );
-      logger.info(`Telegram notification sent for user ${user[0].email} verification`);
-    } catch (telegramErr) {
-      logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-    }
-
-    logger.info(`User ${user[0].email} verification status updated to ${isVerified}`);
-    res.json({ message: `Verification status updated to ${isVerified ? 'verified' : 'not verified'}` });
+    res.json({ message: `Статус верификации обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}` });
   } catch (err) {
-    logger.error(`Error verifying user: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-
-// Delete user
-app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
-  const { id } = req.params;
-
-  try {
-    const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
-    if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
-    const [user] = await db.query('SELECT email, telegramUsername, documents FROM Users WHERE id = ?', [id]);
-    if (!user.length) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    let documents = [];
-    try {
-      documents = user[0].documents ? JSON.parse(user[0].documents) : [];
-      if (!Array.isArray(documents)) documents = [documents];
-    } catch (parseError) {
-      logger.error(`Error parsing documents for ${user[0].email}: ${parseError.message}`);
-    }
-
-    for (const doc of documents) {
-      const docKey = doc.split('/').pop();
-      if (docKey) await deleteFromS3(`documents/${docKey}`);
-    }
-
-    await db.query('DELETE FROM Users WHERE id = ?', [id]);
-
-    if (user[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your account ${user[0].email} was deleted by admin.`);
-          logger.info(`Account deletion notification sent to Telegram for ${user[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-        }
-      }
-    }
-
-    try {
-      await bot.sendMessage(
-        '-1002311447135',
-        `User ${user[0].email} (${user[0].telegramUsername || 'no Telegram'}) deleted`
-      );
-      logger.info(`Telegram notification sent for user ${user[0].email} deletion`);
-    } catch (telegramErr) {
-      logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-    }
-
-    logger.info(`User ${user[0].email} deleted`);
-    res.json({ message: 'User deleted' });
-  } catch (err) {
-    logger.error(`Error deleting user: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка верификации пользователя: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1307,22 +1009,18 @@ app.get('/api/admin/advertisements', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
     const [ads] = await db.query(`
-      SELECT a.*, u.email as userEmail
-      FROM Advertisements a
-      JOIN Users u ON a.userId = u.id
-      ORDER BY a.createdAt DESC
+      SELECT id, name, description, budget, status, impressions, clicks, createdAt
+      FROM Advertisements
+      ORDER BY createdAt DESC
     `);
-    res.json(ads.map(ad => ({
-      ...ad,
-      ctr: ad.clicks > 0 ? (ad.clicks / ad.impressions * 100) : 0,
-    })));
+    res.json(ads);
   } catch (err) {
-    logger.error(`Error fetching advertisements: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка получения рекламных кампаний: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1331,136 +1029,103 @@ app.post(
   '/api/admin/advertisements',
   authenticateToken,
   [
-    body('name').notEmpty().trim().withMessage('Campaign name is required'),
-    body('description').notEmpty().trim().withMessage('Description is required'),
-    body('budget').isFloat({ min: 0 }).withMessage('Budget must be a positive number'),
-    body('status').isIn(['active', 'paused', 'completed']).withMessage('Invalid status'),
-    body('endDate').isDate().withMessage('Invalid end date'),
-    body('userEmail').isEmail().normalizeEmail().withMessage('Valid user email is required'),
+    body('name').notEmpty().trim().withMessage('Требуется название кампании'),
+    body('description').notEmpty().trim().withMessage('Требуется описание'),
+    body('budget').isFloat({ min: 0 }).withMessage('Бюджет должен быть положительным числом'),
+    body('status').isIn(['active', 'paused', 'completed']).withMessage('Недопустимый статус'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
     }
 
     try {
-      const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
-      if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
-        return res.status(403).json({ message: 'Admin access required' });
+      const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+      if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+        return res.status(403).json({ message: 'Требуется доступ администратора' });
       }
 
-      const { name, description, budget, status, endDate, userEmail } = req.body;
-      const [user] = await db.query('SELECT id, telegramUsername FROM Users WHERE email = ?', [userEmail]);
-      if (!user.length) {
-        return res.status(404).json({ message: 'User not found' });
-      }
-
+      const { name, description, budget, status } = req.body;
       const [result] = await db.query(
-        `INSERT INTO Advertisements (name, description, budget, status, endDate, userId, impressions, clicks) 
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
-        [name, description, budget, status, endDate, user[0].id]
+        `INSERT INTO Advertisements (name, description, budget, status, impressions, clicks) 
+         VALUES (?, ?, ?, ?, 0, 0)`,
+        [name, description, budget, status]
       );
 
-      if (user[0].telegramUsername) {
-        const chatId = await resolveTelegramUsername(user[0].telegramUsername);
-        if (chatId) {
-          try {
-            await bot.sendMessage(chatId, `New ad campaign ${name} created with budget $${budget}.`);
-            logger.info(`Ad creation notification sent to Telegram for ${user[0].telegramUsername}`);
-          } catch (telegramErr) {
-            logger.error(`Telegram notification error for ${user[0].telegramUsername}: ${telegramErr.message}`);
-          }
+      logger.info(`Рекламная кампания создана: ${name}`);
+
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новая рекламная кампания создана: ${name}, бюджет: ${budget}, статус: ${status}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для кампании ${name}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
         }
       }
 
-      try {
-        await bot.sendMessage(
-          '-1002311447135',
-          `New ad campaign created: ${name}, budget: ${budget}, status: ${status}, user: ${userEmail}`
-        );
-        logger.info(`Telegram notification sent for campaign ${name}`);
-      } catch (telegramErr) {
-        logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-      }
-
-      logger.info(`Ad campaign created: ${name}`);
       res.status(201).json({
-        message: 'Ad campaign successfully created',
-        ad: {
-          id: result.insertId,
-          name,
-          description,
-          budget,
-          status,
-          endDate,
-          userEmail,
-          impressions: 0,
-          clicks: 0,
-          createdAt: new Date(),
-        },
+        message: 'Рекламная кампания успешно создана',
+        ad: { id: result.insertId, name, description, budget, status, impressions: 0, clicks: 0, createdAt: new Date() },
       });
     } catch (error) {
-      logger.error(`Error creating ad campaign: ${error.message}, stack: ${error.stack}`);
-      res.status(500).json({ message: 'Server error', error: error.message });
+      logger.error(`Ошибка создания рекламной кампании: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
 
-// Update advertisement
+// Update advertisement status
 app.put('/api/admin/advertisements/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { status, endDate } = req.body;
+  const { status } = req.body;
 
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    if (!['active', 'paused', 'completed'].includes(status)) {
+      return res.status(400).json({ message: 'Недопустимый статус' });
     }
 
     const [ad] = await db.query('SELECT * FROM Advertisements WHERE id = ?', [id]);
     if (!ad.length) {
-      return res.status(404).json({ message: 'Campaign not found' });
+      return res.status(404).json({ message: 'Кампания не найдена' });
     }
 
-    const updates = {};
-    if (status && !['active', 'paused', 'completed'].includes(status)) {
-      return res.status(400).json({ message: 'Invalid status' });
-    }
-    if (status) updates.status = status;
-    if (endDate) updates.endDate = endDate;
+    await db.query('UPDATE Advertisements SET status = ? WHERE id = ?', [status, id]);
+    logger.info(`Статус кампании ${id} обновлен на ${status}`);
 
-    await db.query('UPDATE Advertisements SET ? WHERE id = ?', [updates, id]);
-
-    const [adUser] = await db.query('SELECT email, telegramUsername FROM Users WHERE id = ?', [ad[0].userId]);
-    if (adUser[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(adUser[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your campaign ${ad[0].name} status updated to ${status || ad[0].status}.`);
-          logger.info(`Campaign update notification sent to Telegram for ${adUser[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${adUser[0].telegramUsername}: ${telegramErr.message}`);
-        }
+    if (TELEGRAM_BOT_TOKEN) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Статус кампании ${ad[0].name} обновлен на ${status}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для кампании ${ad[0].name}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
       }
     }
 
-    try {
-      await bot.sendMessage(
-        '-1002311447135',
-        `Campaign ${ad[0].name} status updated to ${status || ad[0].status} for user ${adUser[0].email} (${adUser[0].telegramUsername || 'no Telegram'})`
-      );
-      logger.info(`Telegram notification sent for campaign ${ad[0].name}`);
-    } catch (telegramErr) {
-      logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-    }
-
-    logger.info(`Campaign ${id} updated`);
-    res.json({ message: `Campaign updated` });
+    res.json({ message: `Статус кампании обновлен на ${status}` });
   } catch (err) {
-    logger.error(`Error updating campaign: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка обновления кампании: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
@@ -1471,66 +1136,43 @@ app.delete('/api/admin/advertisements/:id', authenticateToken, async (req, res) 
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
-    const [ad] = await db.query('SELECT name, userId FROM Advertisements WHERE id = ?', [id]);
+    const [ad] = await db.query('SELECT * FROM Advertisements WHERE id = ?', [id]);
     if (!ad.length) {
-      return res.status(404).json({ message: 'Campaign not found' });
+      return res.status(404).json({ message: 'Кампания не найдена' });
     }
 
-    const [adUser] = await db.query('SELECT email, telegramUsername FROM Users WHERE id = ?', [ad[0].userId]);
     await db.query('DELETE FROM Advertisements WHERE id = ?', [id]);
+    logger.info(`Кампания ${id} удалена`);
 
-    if (adUser[0].telegramUsername) {
-      const chatId = await resolveTelegramUsername(adUser[0].telegramUsername);
-      if (chatId) {
-        try {
-          await bot.sendMessage(chatId, `Your campaign ${ad[0].name} was deleted by admin.`);
-          logger.info(`Campaign deletion notification sent to Telegram for ${adUser[0].telegramUsername}`);
-        } catch (telegramErr) {
-          logger.error(`Telegram notification error for ${adUser[0].telegramUsername}: ${telegramErr.message}`);
-        }
-      }
-    }
-
-    try {
-      await bot.sendMessage(
-        '-1002311447135',
-        `Campaign ${ad[0].name} deleted for user ${adUser[0].email} (${adUser[0].telegramUsername || 'no Telegram'})`
-      );
-      logger.info(`Telegram notification sent for campaign ${ad[0].name} deletion`);
-    } catch (telegramErr) {
-      logger.error(`Telegram admin notification error: ${telegramErr.message}`);
-    }
-
-    logger.info(`Campaign ${id} deleted`);
-    res.json({ message: 'Campaign deleted' });
+    res.json({ message: 'Кампания удалена' });
   } catch (err) {
-    logger.error(`Error deleting campaign: ${err.message}, stack: ${err.stack}`);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    logger.error(`Ошибка удаления кампании: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  logger.error(`Unhandled error: ${err.message}, stack: ${err.stack}, route: ${req.originalUrl}`);
+  logger.error(`Необработанная ошибка: ${err.message}, стек: ${err.stack}, маршрут: ${req.originalUrl}`);
   if (err instanceof multer.MulterError) {
-    logger.warn(`Multer error: ${err.message}`);
-    return res.status(400).json({ message: `File upload error: ${err.message}` });
+    logger.warn(`Ошибка Multer: ${err.message}`);
+    return res.status(400).json({ message: `Ошибка загрузки файла: ${err.message}` });
   }
-  if (err.message.includes('Only')) {
-    logger.warn(`File type error: ${err.message}`);
+  if (err.message.includes('Разрешены только')) {
+    logger.warn(`Ошибка типа файла: ${err.message}`);
     return res.status(400).json({ message: err.message });
   }
-  res.status(500).json({ message: 'Server error', error: err.message });
+  res.status(500).json({ message: 'Ошибка сервера', error: err.message });
 });
 
 // Graceful shutdown
 async function shutdown() {
-  logger.info('Performing graceful shutdown...');
+  logger.info('Выполняется грациозное завершение работы...');
   await db.end();
-  logger.info('Database connection closed');
+  logger.info('Соединение с базой данных закрыто');
   process.exit(0);
 }
 
