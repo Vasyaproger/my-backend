@@ -461,18 +461,35 @@ app.post(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
-          addressPostalCode || null, JSON.stringify(documentUrls), true,
+          addressPostalCode || null, JSON.stringify(documentUrls), false // Верификация отключена при регистрации
         ]
       );
 
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
+      // Отправка уведомления админу о новых документах
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новые документы для проверки от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для документов пользователя ${email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+        }
+      }
+
       logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
       res.status(201).json({
-        message: 'Регистрация успешна',
+        message: 'Регистрация успешна. Ожидайте проверки документов администратором.',
         token: authToken,
-        user: { id: result.insertId, email, accountType, name, phone },
+        user: { id: result.insertId, email, accountType, name, phone, isVerified: false },
       });
     } catch (error) {
       logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
@@ -515,8 +532,8 @@ app.post(
       logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
         token,
-        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone },
-        message: 'Вход успешен',
+        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone, isVerified: user[0].isVerified },
+        message: user[0].isVerified ? 'Вход успешен' : 'Вход успешен, но аккаунт ожидает верификации',
       });
     } catch (error) {
       logger.error(`Ошибка входа: ${error.message}, стек: ${error.stack}`);
@@ -675,11 +692,31 @@ app.post(
 
       const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
       await db.query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
-        JSON.stringify(updatedDocuments), true, user[0].id
+        JSON.stringify(updatedDocuments), false, user[0].id // Верификация отключена до проверки админом
       ]);
 
+      // Отправка уведомления админу
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новые документы для проверки от пользователя ${user[0].email}. Количество: ${newDocuments.length}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для документов пользователя ${user[0].email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+        }
+      }
+
       logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
-      res.status(200).json({ message: 'Документы успешно обновлены', documents: updatedDocuments });
+      res.status(200).json({ 
+        message: 'Документы успешно загружены и ожидают проверки администратором', 
+        documents: updatedDocuments 
+      });
     } catch (error) {
       logger.error(`Ошибка обновления документов: ${error.message}, стек: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
@@ -768,6 +805,7 @@ app.post(
 );
 
 // Админ-маршруты
+// Получение списка приложений
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -788,6 +826,7 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   }
 });
 
+// Обновление статуса приложения
 app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -834,6 +873,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Удаление приложения
 app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
@@ -863,6 +903,88 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     res.json({ message: 'Приложение удалено' });
   } catch (err) {
     logger.error(`Ошибка удаления приложения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Получение списка пользователей и их документов для админа
+app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    const [users] = await db.query(`
+      SELECT id, email, name, accountType, documents, isVerified, createdAt
+      FROM Users
+      WHERE documents IS NOT NULL
+      ORDER BY createdAt DESC
+    `);
+
+    const usersWithDocuments = users.map(u => {
+      let documents = [];
+      try {
+        documents = u.documents ? JSON.parse(u.documents) : [];
+        if (!Array.isArray(documents)) {
+          documents = [documents];
+        }
+      } catch (parseError) {
+        logger.error(`Ошибка парсинга документов для пользователя ${u.email}: ${parseError.message}`);
+        documents = [];
+      }
+      return { ...u, documents };
+    });
+
+    res.json(usersWithDocuments);
+  } catch (err) {
+    logger.error(`Ошибка получения документов пользователей для админа: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Верификация документов пользователя админом
+app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { isVerified } = req.body;
+
+  try {
+    const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    if (typeof isVerified !== 'boolean') {
+      return res.status(400).json({ message: 'Недопустимый статус верификации' });
+    }
+
+    const [user] = await db.query('SELECT email, documents FROM Users WHERE id = ?', [id]);
+    if (!user.length) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+
+    await db.query('UPDATE Users SET isVerified = ? WHERE id = ?', [isVerified, id]);
+    logger.info(`Статус верификации пользователя ${user[0].email} обновлен на ${isVerified}`);
+
+    if (TELEGRAM_BOT_TOKEN) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Статус верификации пользователя ${user[0].email} обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для верификации пользователя ${user[0].email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+      }
+    }
+
+    res.json({ message: `Статус верификации обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}` });
+  } catch (err) {
+    logger.error(`Ошибка верификации пользователя: ${err.message}, стек: ${err.stack}`);
     res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
