@@ -26,7 +26,7 @@ const PORT = 5000;
 const BUCKET_NAME = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
-// Проверка обязательных переменных
+// Проверка обязательных переменных окружения
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'];
 for (const envVar of requiredEnvVars) {
   const value = eval(envVar);
@@ -36,7 +36,7 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
-// Логгер
+// Настройка логгера
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -50,7 +50,7 @@ const logger = winston.createLogger({
   ],
 });
 
-// S3 Клиент
+// Настройка S3 клиента
 const s3Client = new S3Client({
   endpoint: 'https://s3.twcstorage.ru',
   credentials: {
@@ -75,7 +75,7 @@ async function checkS3Connection() {
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: '*', // Разрешить всем доменам
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Authorization'],
@@ -93,7 +93,7 @@ const db = mysql.createPool({
   connectTimeout: 30000,
 });
 
-// Конфигурация Multer
+// Настройка Multer для загрузки файлов
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -144,7 +144,7 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// Функция загрузки в S3
+// Функция загрузки файла в S3
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
@@ -172,7 +172,7 @@ async function uploadToS3(file, folder) {
   }
 }
 
-// Функция удаления из S3
+// Функция удаления файла из S3
 async function deleteFromS3(key) {
   const params = {
     Bucket: BUCKET_NAME,
@@ -188,7 +188,7 @@ async function deleteFromS3(key) {
   }
 }
 
-// Функция получения из S3
+// Функция получения файла из S3
 async function getFromS3(key) {
   const params = {
     Bucket: BUCKET_NAME,
@@ -205,7 +205,7 @@ async function getFromS3(key) {
   }
 }
 
-// Middleware для аутентификации JWT
+// Middleware для проверки JWT токена
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -223,8 +223,11 @@ const authenticateToken = (req, res, next) => {
     logger.info(`Токен проверен: id=${decoded.id}, email=${decoded.email}, маршрут: ${req.originalUrl}`);
     next();
   } catch (error) {
-    logger.error(`Недействительный токен для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
-    return res.status(403).json({ message: 'Недействительный или истекший токен' });
+    logger.error(`Ошибка проверки токена для маршрута ${req.originalUrl}: ${error.message}, стек: ${error.stack}`);
+    return res.status(403).json({ 
+      message: 'Недействительный или истекший токен', 
+      error: error.message 
+    });
   }
 };
 
@@ -338,6 +341,7 @@ async function initializeServer() {
 }
 
 // Публичные маршруты
+// Получение списка одобренных приложений
 app.get('/api/public/apps', async (req, res) => {
   try {
     const [apps] = await db.query(`
@@ -353,6 +357,7 @@ app.get('/api/public/apps', async (req, res) => {
   }
 });
 
+// Получение изображения приложения
 app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
   try {
@@ -365,7 +370,7 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
   }
 });
 
-// Предрегистрация
+// Предрегистрация пользователя
 app.post(
   '/api/pre-register',
   [
@@ -457,13 +462,14 @@ app.post(
         ]
       );
 
+      // Генерация нового токена
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
       logger.info(`Пользователь зарегистрирован: ${email}`);
       res.status(201).json({
         message: 'Регистрация успешна',
-        token: authToken,
+        token: authToken, // Возвращаем токен
         user: { id: result.insertId, email, accountType, name, phone },
       });
     } catch (error) {
@@ -501,15 +507,13 @@ app.post(
         return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
-      let token = user[0].jwtToken;
-      if (!token) {
-        token = jwt.sign({ id: user[0].id, email: user[0].email }, JWT_SECRET, { expiresIn: '7d' });
-        await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user[0].id]);
-      }
+      // Генерация нового токена при каждом входе
+      const token = jwt.sign({ id: user[0].id, email: user[0].email }, JWT_SECRET, { expiresIn: '7d' });
+      await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user[0].id]);
 
       logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
-        token,
+        token, // Возвращаем токен
         user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone },
         message: 'Вход успешен',
       });
@@ -520,7 +524,7 @@ app.post(
   }
 );
 
-// Сброс пароля (запрос)
+// Запрос на сброс пароля
 app.post(
   '/api/auth/forgot-password',
   [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
@@ -554,7 +558,7 @@ app.post(
   }
 );
 
-// Сброс пароля (выполнение)
+// Выполнение сброса пароля
 app.post(
   '/api/auth/reset-password/:token',
   [
@@ -604,7 +608,7 @@ app.post(
   }
 );
 
-// Профиль пользователя
+// Получение профиля пользователя
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query(
@@ -623,7 +627,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление документов
+// Обновление документов пользователя
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -738,6 +742,7 @@ app.post(
 );
 
 // Админ-маршруты
+// Получение списка всех приложений
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -758,6 +763,7 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   }
 });
 
+// Обновление статуса приложения
 app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -804,6 +810,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Удаление приложения
 app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
