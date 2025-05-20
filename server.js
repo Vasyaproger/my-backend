@@ -109,15 +109,15 @@ const upload = multer({
       logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
     } else if (file.fieldname === 'icon') {
-      const validMimeTypes = ['image/jpeg', 'image/png', 'image/jpg'];
-      const validExtensions = /\.(jpg|jpeg|png)$/i;
+      const validMimeTypes = ['image/png']; // Ограничиваем только PNG
+      const validExtensions = /\.png$/i; // Только .png
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
       if (extname && mimetype) {
         return cb(null, true);
       }
-      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы JPG, JPEG и PNG для иконок!'));
+      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}. Разрешены только файлы PNG!`);
+      cb(new Error('Разрешены только файлы PNG для иконок!'));
     } else if (file.fieldname === 'apk') {
       const extname = file.originalname.toLowerCase().endsWith('.apk');
       const validMimeTypes = [
@@ -362,7 +362,7 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
   const { key } = req.params;
   try {
     const image = await getFromS3(`icons/${key}`);
-    res.setHeader('Content-Type', image.ContentType || 'image/jpeg');
+    res.setHeader('Content-Type', image.ContentType || 'image/png'); // Устанавливаем PNG как дефолт
     image.Body.pipe(res);
   } catch (err) {
     logger.error(`Ошибка получения изображения: ${err.message}, стек: ${err.stack}`);
@@ -552,7 +552,7 @@ app.post(
       logger.info(`Запрошен сброс пароля для ${user[0].email}`);
       res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку email)' });
     } catch (error) {
-      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
+      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${err.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -722,7 +722,7 @@ app.post(
 
       if (!files || !files.icon || !files.icon[0]) {
         logger.warn('Файл иконки отсутствует');
-        return res.status(400).json({ message: 'Требуется файл иконки (JPG, JPEG или PNG)' });
+        return res.status(400).json({ message: 'Требуется файл иконки (только PNG)' });
       }
       if (!files.apk || !files.apk[0]) {
         logger.warn('Файл APK отсутствует');
