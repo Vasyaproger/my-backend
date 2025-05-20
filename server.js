@@ -93,26 +93,17 @@ const db = mysql.createPool({
   connectTimeout: 30000,
 });
 
-// Настройка Multer для загрузки файлов
+// Настройка Multer для загрузки файлов с улучшенным логированием
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.fieldname === 'documents') {
-      const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
-      const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
+    if (file.fieldname === 'icon') {
+      const validMimeTypes = ['image/png'];
+      const validExtensions = /\.png$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
-      if (extname && mimetype) {
-        return cb(null, true);
-      }
-      logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
-      cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
-    } else if (file.fieldname === 'icon') {
-      const validMimeTypes = ['image/png']; // Ограничиваем только PNG
-      const validExtensions = /\.png$/i; // Только .png
-      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
-      const mimetype = validMimeTypes.includes(file.mimetype);
+      console.log(`Icon upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
         return cb(null, true);
       }
@@ -127,12 +118,24 @@ const upload = multer({
         'application/zip',
       ];
       const mimetype = validMimeTypes.includes(file.mimetype);
+      console.log(`APK upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
         logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
       logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Разрешены только файлы APK!'));
+    } else if (file.fieldname === 'documents') {
+      const validMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+      const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
+      const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = validMimeTypes.includes(file.mimetype);
+      console.log(`Document upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
+      if (extname && mimetype) {
+        return cb(null, true);
+      }
+      logger.warn(`Недопустимый документ: имя=${file.originalname}, MIME=${file.mimetype}`);
+      cb(new Error('Разрешены только файлы PDF, JPG, JPEG и PNG для документов!'));
     } else {
       logger.warn(`Недопустимое имя поля: ${file.fieldname}`);
       cb(new Error('Недопустимое имя поля!'));
@@ -362,7 +365,7 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
   const { key } = req.params;
   try {
     const image = await getFromS3(`icons/${key}`);
-    res.setHeader('Content-Type', image.ContentType || 'image/png'); // Устанавливаем PNG как дефолт
+    res.setHeader('Content-Type', image.ContentType || 'image/png');
     image.Body.pipe(res);
   } catch (err) {
     logger.error(`Ошибка получения изображения: ${err.message}, стек: ${err.stack}`);
@@ -462,7 +465,6 @@ app.post(
         ]
       );
 
-      // Генерация нового токена
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
@@ -507,7 +509,6 @@ app.post(
         return res.status(400).json({ message: 'Неверный email или пароль' });
       }
 
-      // Генерация нового токена при каждом входе
       const token = jwt.sign({ id: user[0].id, email: user[0].email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user[0].id]);
 
@@ -552,7 +553,7 @@ app.post(
       logger.info(`Запрошен сброс пароля для ${user[0].email}`);
       res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку email)' });
     } catch (error) {
-      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${err.stack}`);
+      logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
@@ -620,20 +621,18 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Пользователь не найден' });
     }
 
-    // Безопасное парсинг документов
     let documents = [];
     try {
       if (user[0].documents) {
         documents = typeof user[0].documents === 'string' ? JSON.parse(user[0].documents) : user[0].documents;
         if (!Array.isArray(documents)) {
-          // Если documents - строка (например, URL), преобразуем в массив
           documents = [documents];
         }
       }
       logger.info(`Документы пользователя ${user[0].email}: ${JSON.stringify(documents)}`);
     } catch (parseError) {
       logger.error(`Ошибка парсинга документов для пользователя ${user[0].email}: ${parseError.message}, documents: ${user[0].documents}`);
-      documents = []; // Возвращаем пустой массив в случае ошибки
+      documents = [];
     }
 
     user[0].documents = documents;
@@ -769,7 +768,6 @@ app.post(
 );
 
 // Админ-маршруты
-// Получение списка всех приложений
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -790,7 +788,6 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление статуса приложения
 app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -837,7 +834,6 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Удаление приложения
 app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
