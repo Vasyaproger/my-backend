@@ -28,7 +28,7 @@ const BUCKET_NAME = process.env.BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // Проверка обязательных переменных окружения
-const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME'];
+const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME', 'TELEGRAM_BOT_TOKEN'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
     console.error(`Ошибка: ${envVar} не установлен в переменных окружения`);
@@ -93,7 +93,7 @@ const db = mysql.createPool({
   connectTimeout: 30000,
 });
 
-// Настройка Multer для загрузки файлов с улучшенным логированием
+// Настройка Multer для загрузки файлов
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -103,11 +103,10 @@ const upload = multer({
       const validExtensions = /\.png$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
-      console.log(`Icon upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
         return cb(null, true);
       }
-      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}. Разрешены только файлы PNG!`);
+      logger.warn(`Недопустимая иконка: имя=${file.originalname}, MIME=${file.mimetype}`);
       cb(new Error('Разрешены только файлы PNG для иконок!'));
     } else if (file.fieldname === 'apk') {
       const extname = file.originalname.toLowerCase().endsWith('.apk');
@@ -118,9 +117,7 @@ const upload = multer({
         'application/zip',
       ];
       const mimetype = validMimeTypes.includes(file.mimetype);
-      console.log(`APK upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
-        logger.info(`APK принят: имя=${file.originalname}, MIME=${file.mimetype}`);
         return cb(null, true);
       }
       logger.warn(`Недопустимый APK: имя=${file.originalname}, MIME=${file.mimetype}`);
@@ -130,7 +127,6 @@ const upload = multer({
       const validExtensions = /\.(pdf|jpg|jpeg|png)$/i;
       const extname = validExtensions.test(path.extname(file.originalname).toLowerCase());
       const mimetype = validMimeTypes.includes(file.mimetype);
-      console.log(`Document upload: originalname=${file.originalname}, mimetype=${file.mimetype}, extname=${extname}, mimetypeCheck=${mimetype}`);
       if (extname && mimetype) {
         return cb(null, true);
       }
@@ -265,12 +261,15 @@ async function initializeDatabase() {
         accountType ENUM('individual', 'commercial') NOT NULL,
         name VARCHAR(255) NOT NULL,
         phone VARCHAR(20) NOT NULL,
+        telegramId VARCHAR(255) UNIQUE,
         addressStreet VARCHAR(255),
         addressCity VARCHAR(255),
         addressCountry VARCHAR(255),
         addressPostalCode VARCHAR(20),
         documents JSON,
         isVerified BOOLEAN DEFAULT FALSE,
+        verificationToken VARCHAR(500),
+        verificationExpires DATETIME,
         jwtToken VARCHAR(500),
         resetPasswordToken VARCHAR(500),
         resetPasswordExpires DATETIME,
@@ -396,20 +395,18 @@ app.post(
       await db.query('INSERT INTO PreRegisters (email) VALUES (?)', [email]);
       logger.info(`Предрегистрация: ${email}`);
 
-      if (TELEGRAM_BOT_TOKEN) {
-        try {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: '-1002311447135',
-              text: `Новая предрегистрация: ${email}`,
-              parse_mode: 'Markdown',
-            }
-          );
-          logger.info(`Уведомление в Telegram отправлено для ${email}`);
-        } catch (telegramErr) {
-          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
-        }
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Новая предрегистрация: ${email}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для ${email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
       }
 
       res.status(201).json({ message: `Спасибо! Ваш email (${email}) добавлен в список ожидания.` });
@@ -430,6 +427,7 @@ app.post(
     body('accountType').isIn(['individual', 'commercial']).withMessage('Недопустимый тип аккаунта'),
     body('name').notEmpty().trim().withMessage('Требуется имя'),
     body('phone').notEmpty().trim().withMessage('Требуется номер телефона'),
+    body('telegramId').notEmpty().trim().withMessage('Требуется Telegram ID или имя пользователя'),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -439,57 +437,80 @@ app.post(
     }
 
     try {
-      const { email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode } = req.body;
-      if (!req.files || !req.files.documents || req.files.documents.length === 0) {
-        logger.warn('Документы не загружены');
-        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
-      }
+      const { email, password, accountType, name, phone, telegramId, addressStreet, addressCity, addressCountry, addressPostalCode } = req.body;
 
+      // Проверка существования email
       const [existingUser] = await db.query('SELECT email FROM Users WHERE email = ?', [email]);
       if (existingUser.length > 0) {
         return res.status(400).json({ message: 'Email уже зарегистрирован' });
       }
 
+      // Проверка существования telegramId
+      const [existingTelegram] = await db.query('SELECT telegramId FROM Users WHERE telegramId = ?', [telegramId]);
+      if (existingTelegram.length > 0) {
+        return res.status(400).json({ message: 'Telegram ID уже используется' });
+      }
+
+      if (!req.files || !req.files.documents || req.files.documents.length === 0) {
+        logger.warn('Документы не загружены');
+        return res.status(400).json({ message: 'Требуется хотя бы один документ' });
+      }
+
       const documentUrls = await Promise.all(req.files.documents.map(file => uploadToS3(file, 'documents')));
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
+      const verificationToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: '24h' });
 
       const [result] = await db.query(
         `INSERT INTO Users (
-          email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode,
-          documents, isVerified
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          email, password, accountType, name, phone, telegramId, addressStreet, addressCity, addressCountry, addressPostalCode,
+          documents, isVerified, verificationToken, verificationExpires
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
-          addressPostalCode || null, JSON.stringify(documentUrls), false // Верификация отключена при регистрации
+          email, hashedPassword, accountType, name, phone, telegramId, addressStreet || null, addressCity || null, addressCountry || null,
+          addressPostalCode || null, JSON.stringify(documentUrls), false, verificationToken, new Date(Date.now() + 24 * 3600000)
         ]
       );
 
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
-      // Отправка уведомления админу о новых документах
-      if (TELEGRAM_BOT_TOKEN) {
-        try {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: '-1002311447135',
-              text: `Новые документы для проверки от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
-              parse_mode: 'Markdown',
-            }
-          );
-          logger.info(`Уведомление в Telegram отправлено для документов пользователя ${email}`);
-        } catch (telegramErr) {
-          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
-        }
+      // Отправка ссылки для верификации через Telegram
+      try {
+        const verificationUrl = `https://your-app-domain.com/api/auth/verify/${verificationToken}`;
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: telegramId,
+            text: `Добро пожаловать, ${name}! Пожалуйста, подтвердите ваш аккаунт, перейдя по ссылке: ${verificationUrl}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Ссылка для верификации отправлена на Telegram ${telegramId} для ${email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка отправки верификационного сообщения в Telegram: ${telegramErr.message}`);
+      }
+
+      // Уведомление админа о новых документах
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Новые документы для проверки от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление админу отправлено для документов пользователя ${email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления админу в Telegram: ${telegramErr.message}`);
       }
 
       logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
       res.status(201).json({
-        message: 'Регистрация успешна. Ожидайте проверки документов администратором.',
+        message: 'Регистрация успешна. Проверьте ваш Telegram для подтверждения аккаунта.',
         token: authToken,
-        user: { id: result.insertId, email, accountType, name, phone, isVerified: false },
+        user: { id: result.insertId, email, accountType, name, phone, telegramId, isVerified: false },
       });
     } catch (error) {
       logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
@@ -497,6 +518,34 @@ app.post(
     }
   }
 );
+
+// Верификация аккаунта
+app.get('/api/auth/verify/:token', async (req, res) => {
+  const { token } = req.params;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const [user] = await db.query(
+      'SELECT id, email, verificationToken, verificationExpires FROM Users WHERE email = ? AND verificationToken = ? AND verificationExpires > NOW()',
+      [decoded.email, token]
+    );
+
+    if (!user.length) {
+      logger.warn(`Недействительный или истекший токен верификации для email: ${decoded.email}`);
+      return res.status(400).json({ message: 'Недействительный или истекший токен верификации' });
+    }
+
+    await db.query(
+      'UPDATE Users SET isVerified = ?, verificationToken = NULL, verificationExpires = NULL WHERE email = ?',
+      [true, decoded.email]
+    );
+
+    logger.info(`Аккаунт верифицирован для ${decoded.email}`);
+    res.status(200).json({ message: 'Аккаунт успешно верифицирован' });
+  } catch (error) {
+    logger.error(`Ошибка верификации аккаунта: ${error.message}, стек: ${error.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+  }
+});
 
 // Вход пользователя
 app.post(
@@ -532,7 +581,7 @@ app.post(
       logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
         token,
-        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone, isVerified: user[0].isVerified },
+        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone, telegramId: user[0].telegramId, isVerified: user[0].isVerified },
         message: user[0].isVerified ? 'Вход успешен' : 'Вход успешен, но аккаунт ожидает верификации',
       });
     } catch (error) {
@@ -555,7 +604,7 @@ app.post(
 
     try {
       const { email } = req.body;
-      const [user] = await db.query('SELECT id, email FROM Users WHERE email = ?', [email]);
+      const [user] = await db.query('SELECT id, email, telegramId FROM Users WHERE email = ?', [email]);
       if (!user.length) {
         logger.warn(`Попытка сброса пароля для несуществующего email: ${email}`);
         return res.status(404).json({ message: 'Пользователь с таким email не найден' });
@@ -567,8 +616,26 @@ app.post(
         [resetToken, new Date(Date.now() + 3600000), email]
       );
 
+      // Отправка ссылки для сброса пароля через Telegram
+      if (user[0].telegramId) {
+        try {
+          const resetUrl = `https://your-app-domain.com/api/auth/reset-password/${resetToken}`;
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: user[0].telegramId,
+              text: `Запрос на сброс пароля. Перейдите по ссылке для сброса: ${resetUrl}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Ссылка для сброса пароля отправлена на Telegram ${user[0].telegramId} для ${email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка отправки сообщения о сбросе пароля в Telegram: ${telegramErr.message}`);
+        }
+      }
+
       logger.info(`Запрошен сброс пароля для ${user[0].email}`);
-      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена (реализуйте отправку email)' });
+      res.status(200).json({ message: 'Ссылка для сброса пароля отправлена на ваш Telegram' });
     } catch (error) {
       logger.error(`Ошибка сброса пароля: ${error.message}, стек: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
@@ -630,7 +697,7 @@ app.post(
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query(
-      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt FROM Users WHERE id = ?',
+      'SELECT id, email, accountType, name, phone, telegramId, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt FROM Users WHERE id = ?',
       [req.user.id]
     );
     if (!user.length) {
@@ -667,7 +734,7 @@ app.post(
   upload,
   async (req, res) => {
     try {
-      const [user] = await db.query('SELECT id, email, documents FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, documents, telegramId FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
         logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
         return res.status(404).json({ message: 'Пользователь не найден' });
@@ -692,24 +759,22 @@ app.post(
 
       const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
       await db.query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
-        JSON.stringify(updatedDocuments), false, user[0].id // Верификация отключена до проверки админом
+        JSON.stringify(updatedDocuments), false, user[0].id
       ]);
 
-      // Отправка уведомления админу
-      if (TELEGRAM_BOT_TOKEN) {
-        try {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: '-1002311447135',
-              text: `Новые документы для проверки от пользователя ${user[0].email}. Количество: ${newDocuments.length}`,
-              parse_mode: 'Markdown',
-            }
-          );
-          logger.info(`Уведомление в Telegram отправлено для документов пользователя ${user[0].email}`);
-        } catch (telegramErr) {
-          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
-        }
+      // Уведомление админа
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Новые документы для проверки от пользователя ${user[0].email}. Количество: ${newDocuments.length}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для документов пользователя ${user[0].email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
       }
 
       logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
@@ -777,20 +842,18 @@ app.post(
 
       logger.info(`Приложение создано пользователем ${user[0].email}: ${name}`);
 
-      if (TELEGRAM_BOT_TOKEN) {
-        try {
-          await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: '-1002311447135',
-              text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
-              parse_mode: 'Markdown',
-            }
-          );
-          logger.info(`Уведомление в Telegram отправлено для приложения ${name}`);
-        } catch (telegramErr) {
-          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
-        }
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Новое приложение отправлено: ${name} от ${user[0].email}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для приложения ${name}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
       }
 
       res.status(201).json({
@@ -849,13 +912,13 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     await db.query('UPDATE Apps SET status = ? WHERE id = ?', [status, id]);
     logger.info(`Статус приложения ${id} обновлен на ${status}`);
 
-    if (status !== 'pending' && TELEGRAM_BOT_TOKEN) {
-      const [appUser] = await db.query('SELECT email FROM Users WHERE id = ?', [app[0].userId]);
+    if (status !== 'pending') {
+      const [appUser] = await db.query('SELECT email, telegramId FROM Users WHERE id = ?', [app[0].userId]);
       try {
         await axios.post(
           `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
           {
-            chat_id: '-1002311447135',
+            chat_id: appUser[0].telegramId || '-1002311447135',
             text: `Статус приложения ${app[0].name} обновлен на ${status} для пользователя ${appUser[0].email}`,
             parse_mode: 'Markdown',
           }
@@ -916,7 +979,7 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
     }
 
     const [users] = await db.query(`
-      SELECT id, email, name, accountType, documents, isVerified, createdAt
+      SELECT id, email, name, accountType, telegramId, documents, isVerified, createdAt
       FROM Users
       WHERE documents IS NOT NULL
       ORDER BY createdAt DESC
@@ -958,7 +1021,7 @@ app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
       return res.status(400).json({ message: 'Недопустимый статус верификации' });
     }
 
-    const [user] = await db.query('SELECT email, documents FROM Users WHERE id = ?', [id]);
+    const [user] = await db.query('SELECT email, telegramId FROM Users WHERE id = ?', [id]);
     if (!user.length) {
       return res.status(404).json({ message: 'Пользователь не найден' });
     }
@@ -966,13 +1029,13 @@ app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
     await db.query('UPDATE Users SET isVerified = ? WHERE id = ?', [isVerified, id]);
     logger.info(`Статус верификации пользователя ${user[0].email} обновлен на ${isVerified}`);
 
-    if (TELEGRAM_BOT_TOKEN) {
+    if (user[0].telegramId) {
       try {
         await axios.post(
           `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
           {
-            chat_id: '-1002311447135',
-            text: `Статус верификации пользователя ${user[0].email} обновлен на ${isVerified ? 'верифицирован' : 'не верифицирован'}`,
+            chat_id: user[0].telegramId,
+            text: `Ваш аккаунт ${isVerified ? 'верифицирован' : 'не верифицирован'}.`,
             parse_mode: 'Markdown',
           }
         );
