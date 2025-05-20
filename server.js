@@ -256,7 +256,7 @@ async function initializeDatabase() {
     const connection = await db.getConnection();
     logger.info('Подключение к MySQL выполнено');
 
-    // Создание таблицы Users
+    // Создание таблицы Users с полем verificationStatus
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -271,6 +271,7 @@ async function initializeDatabase() {
         addressPostalCode VARCHAR(20),
         documents JSON,
         isVerified BOOLEAN DEFAULT FALSE,
+        verificationStatus ENUM('none', 'pending', 'approved', 'rejected') DEFAULT 'none',
         jwtToken VARCHAR(500),
         resetPasswordToken VARCHAR(500),
         resetPasswordExpires DATETIME,
@@ -314,8 +315,8 @@ async function initializeDatabase() {
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash('admin123', 10);
       await connection.query(
-        "INSERT INTO Users (email, password, accountType, name, phone, isVerified) VALUES (?, ?, ?, ?, ?, ?)",
-        ['admin@24webstudio.ru', hashedPassword, 'commercial', 'Admin', '1234567890', true]
+        "INSERT INTO Users (email, password, accountType, name, phone, isVerified, verificationStatus) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ['admin@24webstudio.ru', hashedPassword, 'commercial', 'Admin', '1234567890', true, 'approved']
       );
       logger.info('Админ создан: admin@24webstudio.ru / admin123');
     } else {
@@ -457,11 +458,11 @@ app.post(
       const [result] = await db.query(
         `INSERT INTO Users (
           email, password, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode,
-          documents, isVerified
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          documents, isVerified, verificationStatus
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
-          addressPostalCode || null, JSON.stringify(documentUrls), true,
+          addressPostalCode || null, JSON.stringify(documentUrls), false, 'pending'
         ]
       );
 
@@ -469,10 +470,27 @@ app.post(
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
       logger.info(`Пользователь зарегистрирован: ${email}, documents: ${JSON.stringify(documentUrls)}`);
+
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новый запрос на верификацию от ${email}. Документы: ${JSON.stringify(documentUrls)}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для верификации ${email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+        }
+      }
+
       res.status(201).json({
-        message: 'Регистрация успешна',
+        message: 'Регистрация успешна, ожидается верификация',
         token: authToken,
-        user: { id: result.insertId, email, accountType, name, phone },
+        user: { id: result.insertId, email, accountType, name, phone, isVerified: false, verificationStatus: 'pending' },
       });
     } catch (error) {
       logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
@@ -515,7 +533,15 @@ app.post(
       logger.info(`Пользователь вошел: ${user[0].email}`);
       res.status(200).json({
         token,
-        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone },
+        user: { 
+          id: user[0].id, 
+          email: user[0].email, 
+          accountType: user[0].accountType, 
+          name: user[0].name, 
+          phone: user[0].phone,
+          isVerified: user[0].isVerified,
+          verificationStatus: user[0].verificationStatus
+        },
         message: 'Вход успешен',
       });
     } catch (error) {
@@ -613,7 +639,7 @@ app.post(
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query(
-      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, createdAt FROM Users WHERE id = ?',
+      'SELECT id, email, accountType, name, phone, addressStreet, addressCity, addressCountry, addressPostalCode, documents, isVerified, verificationStatus, createdAt FROM Users WHERE id = ?',
       [req.user.id]
     );
     if (!user.length) {
@@ -650,7 +676,7 @@ app.post(
   upload,
   async (req, res) => {
     try {
-      const [user] = await db.query('SELECT id, email, documents FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, documents, verificationStatus FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
         logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
         return res.status(404).json({ message: 'Пользователь не найден' });
@@ -674,12 +700,34 @@ app.post(
       }
 
       const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
-      await db.query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
-        JSON.stringify(updatedDocuments), true, user[0].id
+      await db.query('UPDATE Users SET documents = ?, isVerified = ?, verificationStatus = ? WHERE id = ?', [
+        JSON.stringify(updatedDocuments), false, 'pending', user[0].id
       ]);
 
       logger.info(`Документы обновлены для пользователя ${user[0].email}, новые документы: ${JSON.stringify(updatedDocuments)}`);
-      res.status(200).json({ message: 'Документы успешно обновлены', documents: updatedDocuments });
+
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новый запрос на верификацию документов от ${user[0].email}. Документы: ${JSON.stringify(updatedDocuments)}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для верификации ${user[0].email}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+        }
+      }
+
+      res.status(200).json({ 
+        message: 'Документы успешно отправлены на проверку', 
+        documents: updatedDocuments,
+        verificationStatus: 'pending',
+        isVerified: false
+      });
     } catch (error) {
       logger.error(`Ошибка обновления документов: ${error.message}, стек: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
@@ -767,11 +815,141 @@ app.post(
   }
 );
 
+// Получение списка приложений пользователя
+app.get('/api/apps', authenticateToken, async (req, res) => {
+  try {
+    const [apps] = await db.query(
+      'SELECT id, name, description, category, iconPath, apkPath, status, createdAt FROM Apps WHERE userId = ? ORDER BY createdAt DESC',
+      [req.user.id]
+    );
+    res.json(apps);
+  } catch (err) {
+    logger.error(`Ошибка получения приложений пользователя ${req.user.email}: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Удаление приложения
+app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [app] = await db.query('SELECT iconPath, apkPath, userId FROM Apps WHERE id = ?', [id]);
+    if (!app.length) {
+      logger.warn(`Приложение не найдено: ID ${id}`);
+      return res.status(404).json({ message: 'Приложение не найдено' });
+    }
+
+    if (app[0].userId !== req.user.id) {
+      logger.warn(`Попытка удаления чужого приложения: ID ${id}, пользователь ${req.user.email}`);
+      return res.status(403).json({ message: 'Нет прав для удаления этого приложения' });
+    }
+
+    if (app[0].iconPath) {
+      const iconKey = app[0].iconPath.split('/').pop();
+      if (iconKey) await deleteFromS3(iconKey);
+    }
+    if (app[0].apkPath) {
+      const apkKey = app[0].apkPath.split('/').pop();
+      if (apkKey) await deleteFromS3(apkKey);
+    }
+
+    await db.query('DELETE FROM Apps WHERE id = ?', [id]);
+    logger.info(`Приложение ${id} удалено пользователем ${req.user.email}`);
+
+    res.json({ message: 'Приложение удалено' });
+  } catch (err) {
+    logger.error(`Ошибка удаления приложения ${id}: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
 // Админ-маршруты
+// Получение списка пользователей для верификации
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      logger.warn(`Попытка доступа к админ-маршруту без прав: ${req.user.email}`);
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    const [users] = await db.query(`
+      SELECT id, email, accountType, name, phone, documents, isVerified, verificationStatus, createdAt
+      FROM Users
+      WHERE verificationStatus IN ('pending', 'rejected')
+      ORDER BY createdAt DESC
+    `);
+    res.json(users);
+  } catch (err) {
+    logger.error(`Ошибка получения списка пользователей для админа: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Верификация пользователя администратором
+app.put('/api/admin/verify-user/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { verificationStatus } = req.body;
+
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      logger.warn(`Попытка верификации пользователя без прав: ${req.user.email}`);
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    if (!['approved', 'rejected'].includes(verificationStatus)) {
+      return res.status(400).json({ message: 'Недопустимый статус верификации' });
+    }
+
+    const [targetUser] = await db.query('SELECT email, verificationStatus FROM Users WHERE id = ?', [id]);
+    if (!targetUser.length) {
+      logger.warn(`Пользователь не найден для верификации: ID ${id}`);
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+
+    if (targetUser[0].verificationStatus !== 'pending') {
+      logger.warn(`Пользователь не находится в статусе pending: ID ${id}, статус ${targetUser[0].verificationStatus}`);
+      return res.status(400).json({ message: 'Пользователь не находится в ожидании верификации' });
+    }
+
+    await db.query('UPDATE Users SET verificationStatus = ?, isVerified = ? WHERE id = ?', [
+      verificationStatus,
+      verificationStatus === 'approved' ? true : false,
+      id
+    ]);
+    logger.info(`Статус верификации пользователя ${targetUser[0].email} обновлен на ${verificationStatus}`);
+
+    if (TELEGRAM_BOT_TOKEN) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Статус верификации пользователя ${targetUser[0].email} обновлен на ${verificationStatus}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для верификации ${targetUser[0].email}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+      }
+    }
+
+    res.json({ message: `Статус верификации пользователя обновлен на ${verificationStatus}` });
+  } catch (err) {
+    logger.error(`Ошибка верификации пользователя ${id}: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Получение списка приложений для админа
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      logger.warn(`Попытка доступа к админ-маршруту без прав: ${req.user.email}`);
       return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
@@ -788,6 +966,7 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   }
 });
 
+// Обновление статуса приложения
 app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -795,6 +974,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      logger.warn(`Попытка обновления приложения без прав: ${req.user.email}`);
       return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
@@ -804,6 +984,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
 
     const [app] = await db.query('SELECT * FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
+      logger.warn(`Приложение не найдено: ID ${id}`);
       return res.status(404).json({ message: 'Приложение не найдено' });
     }
 
@@ -834,17 +1015,20 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Удаление приложения админом
 app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
     if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      logger.warn(`Попытка удаления приложения без прав: ${req.user.email}`);
       return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
     const [app] = await db.query('SELECT iconPath, apkPath FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
+      logger.warn(`Приложение не найдено: ID ${id}`);
       return res.status(404).json({ message: 'Приложение не найдено' });
     }
 
