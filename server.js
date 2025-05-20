@@ -14,7 +14,7 @@ const axios = require('axios');
 
 const app = express();
 
-// Конфигурация (используем environment variables)
+// Configuration (using environment variables)
 require('dotenv').config();
 const JWT_SECRET = process.env.JWT_SECRET || 'x7b9k3m8p2q5w4z6t1r0y9u2j4n6l8h3';
 const DB_HOST = process.env.DB_HOST || 'vh438.timeweb.ru';
@@ -27,7 +27,7 @@ const PORT = process.env.PORT || 5000;
 const BUCKET_NAME = process.env.BUCKET_NAME || '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
-// Проверка обязательных переменных окружения
+// Check required environment variables
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME'];
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
@@ -36,7 +36,7 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
-// Настройка логгера
+// Logger setup
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -50,7 +50,7 @@ const logger = winston.createLogger({
   ],
 });
 
-// Настройка S3 клиента
+// S3 Client setup
 const s3Client = new S3Client({
   endpoint: 'https://s3.twcstorage.ru',
   credentials: {
@@ -61,7 +61,7 @@ const s3Client = new S3Client({
   forcePathStyle: true,
 });
 
-// Проверка соединения с S3
+// Check S3 connection
 async function checkS3Connection() {
   try {
     await s3Client.send(new ListBucketsCommand({}));
@@ -82,7 +82,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Пул соединений с MySQL
+// MySQL connection pool
 const db = mysql.createPool({
   host: DB_HOST,
   user: DB_USER,
@@ -93,7 +93,7 @@ const db = mysql.createPool({
   connectTimeout: 30000,
 });
 
-// Настройка Multer для загрузки файлов с улучшенным логированием
+// Multer setup for file uploads
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -147,7 +147,7 @@ const upload = multer({
   { name: 'documents', maxCount: 3 },
 ]);
 
-// Функция загрузки файла в S3
+// Upload file to S3
 async function uploadToS3(file, folder) {
   const sanitizedName = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9]/g, '_');
   const key = `${folder}/${Date.now()}-${sanitizedName}${path.extname(file.originalname)}`;
@@ -175,7 +175,7 @@ async function uploadToS3(file, folder) {
   }
 }
 
-// Функция удаления файла из S3
+// Delete file from S3
 async function deleteFromS3(key) {
   const params = {
     Bucket: BUCKET_NAME,
@@ -191,7 +191,7 @@ async function deleteFromS3(key) {
   }
 }
 
-// Функция получения файла из S3
+// Get file from S3
 async function getFromS3(key) {
   const params = {
     Bucket: BUCKET_NAME,
@@ -208,7 +208,7 @@ async function getFromS3(key) {
   }
 }
 
-// Middleware для проверки JWT токена
+// JWT authentication middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -234,7 +234,7 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// Middleware для опциональной аутентификации
+// Optional JWT authentication middleware
 const optionalAuthenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -250,13 +250,13 @@ const optionalAuthenticateToken = (req, res, next) => {
   }
 };
 
-// Инициализация базы данных
+// Database initialization
 async function initializeDatabase() {
   try {
     const connection = await db.getConnection();
     logger.info('Подключение к MySQL выполнено');
 
-    // Создание таблицы Users
+    // Create Users table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -280,7 +280,7 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица Users проверена/создана');
 
-    // Создание таблицы PreRegisters
+    // Create PreRegisters table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS PreRegisters (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -291,7 +291,7 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица PreRegisters проверена/создана');
 
-    // Создание таблицы Apps
+    // Create Apps table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Apps (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -309,7 +309,23 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица Apps проверена/создана');
 
-    // Создание администратора по умолчанию
+    // Create Advertisements table
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS Advertisements (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL,
+        budget DECIMAL(10,2) NOT NULL,
+        status ENUM('active', 'paused', 'completed') DEFAULT 'active',
+        impressions INT DEFAULT 0,
+        clicks INT DEFAULT 0,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    logger.info('Таблица Advertisements проверена/создана');
+
+    // Create default admin
     const [users] = await connection.query("SELECT * FROM Users WHERE email = ?", ['admin@24webstudio.ru']);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash('admin123', 10);
@@ -329,7 +345,7 @@ async function initializeDatabase() {
   }
 }
 
-// Инициализация сервера
+// Server initialization
 async function initializeServer() {
   try {
     await initializeDatabase();
@@ -343,8 +359,8 @@ async function initializeServer() {
   }
 }
 
-// Публичные маршруты
-// Получение списка одобренных приложений
+// Public routes
+// Get approved apps
 app.get('/api/public/apps', async (req, res) => {
   try {
     const [apps] = await db.query(`
@@ -360,7 +376,7 @@ app.get('/api/public/apps', async (req, res) => {
   }
 });
 
-// Получение изображения приложения
+// Get app image
 app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
   try {
@@ -373,7 +389,7 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
   }
 });
 
-// Предрегистрация пользователя
+// User pre-registration
 app.post(
   '/api/pre-register',
   [
@@ -420,7 +436,7 @@ app.post(
   }
 );
 
-// Регистрация пользователя
+// User registration
 app.post(
   '/api/auth/register',
   upload,
@@ -461,14 +477,13 @@ app.post(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           email, hashedPassword, accountType, name, phone, addressStreet || null, addressCity || null, addressCountry || null,
-          addressPostalCode || null, JSON.stringify(documentUrls), false // Верификация отключена при регистрации
+          addressPostalCode || null, JSON.stringify(documentUrls), false
         ]
       );
 
       const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
 
-      // Отправка уведомления админу о новых документах
       if (TELEGRAM_BOT_TOKEN) {
         try {
           await axios.post(
@@ -498,7 +513,7 @@ app.post(
   }
 );
 
-// Вход пользователя
+// User login
 app.post(
   '/api/auth/login',
   [
@@ -542,7 +557,7 @@ app.post(
   }
 );
 
-// Запрос на сброс пароля
+// Forgot password
 app.post(
   '/api/auth/forgot-password',
   [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
@@ -576,7 +591,7 @@ app.post(
   }
 );
 
-// Выполнение сброса пароля
+// Reset password
 app.post(
   '/api/auth/reset-password/:token',
   [
@@ -626,7 +641,7 @@ app.post(
   }
 );
 
-// Получение профиля пользователя
+// Get user profile
 app.get('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query(
@@ -660,7 +675,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление документов пользователя
+// Update user documents
 app.post(
   '/api/user/documents',
   authenticateToken,
@@ -692,10 +707,9 @@ app.post(
 
       const updatedDocuments = [...currentDocuments, ...newDocuments].slice(0, 3);
       await db.query('UPDATE Users SET documents = ?, isVerified = ? WHERE id = ?', [
-        JSON.stringify(updatedDocuments), false, user[0].id // Верификация отключена до проверки админом
+        JSON.stringify(updatedDocuments), false, user[0].id
       ]);
 
-      // Отправка уведомления админу
       if (TELEGRAM_BOT_TOKEN) {
         try {
           await axios.post(
@@ -724,7 +738,7 @@ app.post(
   }
 );
 
-// Создание приложения
+// Create app
 app.post(
   '/api/apps/create',
   authenticateToken,
@@ -804,8 +818,8 @@ app.post(
   }
 );
 
-// Админ-маршруты
-// Получение списка приложений
+// Admin routes
+// Get all apps
 app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -826,7 +840,7 @@ app.get('/api/admin/apps', authenticateToken, async (req, res) => {
   }
 });
 
-// Обновление статуса приложения
+// Update app status
 app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -873,7 +887,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Удаление приложения
+// Delete app
 app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
@@ -890,11 +904,11 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
 
     if (app[0].iconPath) {
       const iconKey = app[0].iconPath.split('/').pop();
-      if (iconKey) await deleteFromS3(iconKey);
+      if (iconKey) await deleteFromS3(`icons/${iconKey}`);
     }
     if (app[0].apkPath) {
       const apkKey = app[0].apkPath.split('/').pop();
-      if (apkKey) await deleteFromS3(apkKey);
+      if (apkKey) await deleteFromS3(`apks/${apkKey}`);
     }
 
     await db.query('DELETE FROM Apps WHERE id = ?', [id]);
@@ -907,7 +921,7 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Получение списка пользователей и их документов для админа
+// Get all users and their documents
 app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
   try {
     const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
@@ -943,7 +957,7 @@ app.get('/api/admin/users/documents', authenticateToken, async (req, res) => {
   }
 });
 
-// Верификация документов пользователя админом
+// Verify user documents
 app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { isVerified } = req.body;
@@ -989,7 +1003,158 @@ app.put('/api/admin/users/:id/verify', authenticateToken, async (req, res) => {
   }
 });
 
-// Обработка ошибок
+// Admin routes for advertisements
+// Get all advertisements
+app.get('/api/admin/advertisements', authenticateToken, async (req, res) => {
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    const [ads] = await db.query(`
+      SELECT id, name, description, budget, status, impressions, clicks, createdAt
+      FROM Advertisements
+      ORDER BY createdAt DESC
+    `);
+    res.json(ads);
+  } catch (err) {
+    logger.error(`Ошибка получения рекламных кампаний: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Create advertisement
+app.post(
+  '/api/admin/advertisements',
+  authenticateToken,
+  [
+    body('name').notEmpty().trim().withMessage('Требуется название кампании'),
+    body('description').notEmpty().trim().withMessage('Требуется описание'),
+    body('budget').isFloat({ min: 0 }).withMessage('Бюджет должен быть положительным числом'),
+    body('status').isIn(['active', 'paused', 'completed']).withMessage('Недопустимый статус'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+    }
+
+    try {
+      const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+      if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+        return res.status(403).json({ message: 'Требуется доступ администратора' });
+      }
+
+      const { name, description, budget, status } = req.body;
+      const [result] = await db.query(
+        `INSERT INTO Advertisements (name, description, budget, status, impressions, clicks) 
+         VALUES (?, ?, ?, ?, 0, 0)`,
+        [name, description, budget, status]
+      );
+
+      logger.info(`Рекламная кампания создана: ${name}`);
+
+      if (TELEGRAM_BOT_TOKEN) {
+        try {
+          await axios.post(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+            {
+              chat_id: '-1002311447135',
+              text: `Новая рекламная кампания создана: ${name}, бюджет: ${budget}, статус: ${status}`,
+              parse_mode: 'Markdown',
+            }
+          );
+          logger.info(`Уведомление в Telegram отправлено для кампании ${name}`);
+        } catch (telegramErr) {
+          logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+        }
+      }
+
+      res.status(201).json({
+        message: 'Рекламная кампания успешно создана',
+        ad: { id: result.insertId, name, description, budget, status, impressions: 0, clicks: 0, createdAt: new Date() },
+      });
+    } catch (error) {
+      logger.error(`Ошибка создания рекламной кампании: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+    }
+  }
+);
+
+// Update advertisement status
+app.put('/api/admin/advertisements/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    if (!['active', 'paused', 'completed'].includes(status)) {
+      return res.status(400).json({ message: 'Недопустимый статус' });
+    }
+
+    const [ad] = await db.query('SELECT * FROM Advertisements WHERE id = ?', [id]);
+    if (!ad.length) {
+      return res.status(404).json({ message: 'Кампания не найдена' });
+    }
+
+    await db.query('UPDATE Advertisements SET status = ? WHERE id = ?', [status, id]);
+    logger.info(`Статус кампании ${id} обновлен на ${status}`);
+
+    if (TELEGRAM_BOT_TOKEN) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: '-1002311447135',
+            text: `Статус кампании ${ad[0].name} обновлен на ${status}`,
+            parse_mode: 'Markdown',
+          }
+        );
+        logger.info(`Уведомление в Telegram отправлено для кампании ${ad[0].name}`);
+      } catch (telegramErr) {
+        logger.error(`Ошибка уведомления в Telegram: ${telegramErr.message}`);
+      }
+    }
+
+    res.json({ message: `Статус кампании обновлен на ${status}` });
+  } catch (err) {
+    logger.error(`Ошибка обновления кампании: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Delete advertisement
+app.delete('/api/admin/advertisements/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    const [ad] = await db.query('SELECT * FROM Advertisements WHERE id = ?', [id]);
+    if (!ad.length) {
+      return res.status(404).json({ message: 'Кампания не найдена' });
+    }
+
+    await db.query('DELETE FROM Advertisements WHERE id = ?', [id]);
+    logger.info(`Кампания ${id} удалена`);
+
+    res.json({ message: 'Кампания удалена' });
+  } catch (err) {
+    logger.error(`Ошибка удаления кампании: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Error handling middleware
 app.use((err, req, res, next) => {
   logger.error(`Необработанная ошибка: ${err.message}, стек: ${err.stack}, маршрут: ${req.originalUrl}`);
   if (err instanceof multer.MulterError) {
@@ -1003,7 +1168,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Ошибка сервера', error: err.message });
 });
 
-// Грациозное завершение работы
+// Graceful shutdown
 async function shutdown() {
   logger.info('Выполняется грациозное завершение работы...');
   await db.end();
@@ -1014,5 +1179,5 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Запуск сервера
+// Start server
 initializeServer();
