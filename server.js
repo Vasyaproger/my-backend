@@ -48,6 +48,12 @@ const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB
 const MAX_APP_SIZE = 50 * 1024 * 1024; // 50 MB
 const MAX_DOCUMENT_SIZE = 10 * 1024 * 1024; // 10 MB
 
+// Design-related keywords for description validation
+const DESIGN_RELATED_KEYWORDS = [
+  'дизайн', 'интерфейс', 'визуал', 'цвет', 'тема', 'макет', 'шрифт', 'графика', 'стиль', 'оформление',
+  'layout', 'UI', 'UX', 'interface', 'visual', 'color', 'theme', 'font', 'graphic', 'style', 'design'
+];
+
 // Environment variable validation
 const requiredEnvVars = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'S3_ACCESS_KEY', 'S3_SECRET_KEY', 'BUCKET_NAME', 'TELEGRAM_BOT_TOKEN'];
 for (const envVar of requiredEnvVars) {
@@ -280,6 +286,12 @@ telegramQueue.process(async (job) => {
     throw err;
   }
 });
+
+// Check description for design-related suggestions
+function containsDesignSuggestions(description) {
+  const lowerDescription = description.toLowerCase();
+  return DESIGN_RELATED_KEYWORDS.some(keyword => lowerDescription.includes(keyword));
+}
 
 // Database initialization
 async function initializeDatabase() {
@@ -530,6 +542,29 @@ app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res
   } catch (err) {
     logger.error(`Error fetching image: ${err.message}, stack: ${err.stack}`);
     res.status(500).json({ message: 'Error fetching image', error: err.message });
+  }
+});
+
+// Get specific app by ID (new route to fix 404 error)
+app.get('/api/apps/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [app] = await db.query(`
+      SELECT id, name, description, category, iconPath AS iconUrl, apkPath AS apkUrl, status, createdAt
+      FROM Apps
+      WHERE id = ? AND userId = ?
+    `, [id, req.user.id]);
+
+    if (!app.length) {
+      logger.warn(`Application not found for ID: ${id}, user: ${req.user.email}`);
+      return res.status(404).json({ message: 'Application not found' });
+    }
+
+    logger.info(`Fetched application ID: ${id} for user: ${req.user.email}`);
+    res.json(app[0]);
+  } catch (err) {
+    logger.error(`Error fetching application ID: ${id}: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
@@ -828,7 +863,6 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-
 // Get user applications
 app.get('/api/apps', authenticateToken, async (req, res) => {
   try {
@@ -910,9 +944,6 @@ app.post(
   }
 );
 
-
-
-
 // Create application
 app.post(
   '/api/apps/create',
@@ -931,7 +962,7 @@ app.post(
     }
 
     try {
-      const [user] = await db.query('SELECT id, email, isVerified FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, isVerified, telegramId FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
         logger.warn(`User not found for ID: ${req.user.id}`);
         return res.status(404).json({ message: 'User not found' });
@@ -944,6 +975,20 @@ app.post(
 
       const { name, description, category } = req.body;
       const files = req.files;
+
+      // Check for design-related suggestions in description
+      if (containsDesignSuggestions(description)) {
+        logger.warn(`Design suggestions detected in description for app: ${name}, user: ${user[0].email}`);
+        if (user[0].telegramId) {
+          telegramQueue.add({
+            chatId: user[0].telegramId,
+            text: `Your application "${name}" was rejected because its description contains design-related suggestions (e.g., UI, UX, color). Please revise and resubmit.`,
+          }, { attempts: 3, backoff: 5000 });
+        }
+        return res.status(400).json({
+          message: 'Description contains design-related suggestions. Please revise and resubmit.',
+        });
+      }
 
       if (!files || !files.icon || !files.icon[0]) {
         logger.warn('Icon file missing');
@@ -985,6 +1030,131 @@ app.post(
       });
     } catch (error) {
       logger.error(`Application creation error: ${error.message}, stack: ${error.stack}`);
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+);
+
+// Update application (new route)
+app.put(
+  '/api/apps/:id',
+  authenticateToken,
+  upload,
+  [
+    body('name').notEmpty().trim().withMessage('Application name required'),
+    body('description').notEmpty().trim().withMessage('Description required'),
+    body('category').isIn(['games', 'productivity', 'education', 'entertainment']).withMessage('Invalid category'),
+  ],
+  async (req, res) => {
+    const { id } = req.params;
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn(`Validation errors: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Validation error', errors: errors.array() });
+    }
+
+    try {
+      const [user] = await db.query('SELECT id, email, isVerified, telegramId FROM Users WHERE id = ?', [req.user.id]);
+      if (!user.length) {
+        logger.warn(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      if (!user[0].isVerified) {
+        logger.warn(`Non-verified user: ${user[0].email}`);
+        return res.status(403).json({ message: 'Account must be verified to update applications' });
+      }
+
+      const [app] = await db.query('SELECT * FROM Apps WHERE id = ? AND userId = ?', [id, user[0].id]);
+      if (!app.length) {
+        logger.warn(`Application not found for ID: ${id}, user: ${user[0].email}`);
+        return res.status(404).json({ message: 'Application not found' });
+      }
+
+      const { name, description, category } = req.body;
+      const files = req.files;
+      let iconUrl = app[0].iconPath;
+      let apkUrl = app[0].apkPath;
+
+      // Check for design-related suggestions in description
+      if (containsDesignSuggestions(description)) {
+        logger.warn(`Design suggestions detected in description for app ID: ${id}, user: ${user[0].email}`);
+        
+        // Delete files from S3
+        if (app[0].iconPath) {
+          const iconKey = app[0].iconPath.split('/').pop();
+          if (iconKey) await deleteFromS3(`icons/${iconKey}`);
+        }
+        if (app[0].apkPath) {
+          const apkKey = app[0].apkPath.split('/').pop();
+          if (apkKey) await deleteFromS3(`apks/${apkKey}`);
+        }
+
+        // Delete app from database
+        await db.query('DELETE FROM Apps WHERE id = ?', [id]);
+        logger.info(`Application ID: ${id} deleted due to design suggestions`);
+
+        // Notify user via Telegram
+        if (user[0].telegramId) {
+          telegramQueue.add({
+            chatId: user[0].telegramId,
+            text: `Your application "${app[0].name}" (ID: ${id}) was deleted because its updated description contains design-related suggestions (e.g., UI, UX, color). Please revise and resubmit.`,
+          }, { attempts: 3, backoff: 5000 });
+        }
+
+        return res.status(400).json({
+          message: 'Description contains design-related suggestions. Application deleted. Please revise and resubmit.',
+        });
+      }
+
+      // Handle file uploads if provided
+      if (files && files.icon && files.icon[0]) {
+        if (app[0].iconPath) {
+          const oldIconKey = app[0].iconPath.split('/').pop();
+          if (oldIconKey) await deleteFromS3(`icons/${oldIconKey}`);
+        }
+        iconUrl = await Promise.race([
+          uploadToS3(files.icon[0], 'icons'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Icon upload timeout')), 30000))
+        ]);
+      }
+
+      if (files && files.apk && files.apk[0]) {
+        if (app[0].apkPath) {
+          const oldApkKey = app[0].apkPath.split('/').pop();
+          if (oldApkKey) await deleteFromS3(`apks/${oldApkKey}`);
+        }
+        apkUrl = await Promise.race([
+          uploadToS3(files.apk[0], 'apks'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Application upload timeout')), 30000))
+        ]);
+      }
+
+      await db.query(
+        `UPDATE Apps SET name = ?, description = ?, category = ?, iconPath = ?, apkPath = ?, status = 'pending' WHERE id = ?`,
+        [name, description, category, iconUrl, apkUrl, id]
+      );
+
+      logger.info(`Application ID: ${id} updated by user ${user[0].email}`);
+
+      telegramQueue.add({
+        chatId: '-1002311447135',
+        text: `Application updated: ${name} (ID: ${id}) by ${user[0].email}`,
+      }, { attempts: 3, backoff: 5000 });
+
+      if (user[0].telegramId) {
+        telegramQueue.add({
+          chatId: user[0].telegramId,
+          text: `Your application "${name}" (ID: ${id}) has been updated and is pending review.`,
+        }, { attempts: 3, backoff: 5000 });
+      }
+
+      res.status(200).json({
+        message: 'Application updated successfully',
+        app: { id, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending' },
+      });
+    } catch (error) {
+      logger.error(`Application update error for ID: ${id}: ${error.message}, stack: ${error.stack}`);
       res.status(500).json({ message: 'Server error', error: error.message });
     }
   }
