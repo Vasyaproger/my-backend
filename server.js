@@ -828,6 +828,25 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
+
+// Get user applications
+app.get('/api/apps', authenticateToken, async (req, res) => {
+  try {
+    const [apps] = await db.query(`
+      SELECT id, name, description, category, iconPath AS iconUrl, apkPath AS apkUrl, status, createdAt
+      FROM Apps
+      WHERE userId = ?
+      ORDER BY createdAt DESC
+    `, [req.user.id]);
+
+    logger.info(`Fetched ${apps.length} applications for user ${req.user.email}`);
+    res.json(apps);
+  } catch (err) {
+    logger.error(`Error fetching user apps: ${err.message}, stack: ${err.stack}`);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
 // Upload user documents
 app.post(
   '/api/user/documents',
@@ -890,6 +909,9 @@ app.post(
     }
   }
 );
+
+
+
 
 // Create application
 app.post(
