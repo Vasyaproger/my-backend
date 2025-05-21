@@ -370,6 +370,7 @@ async function initializeDatabase() {
         userId INT NOT NULL,
         status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
         rejectionReason TEXT,
+        isPublished BOOLEAN DEFAULT FALSE,
         createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
@@ -377,12 +378,16 @@ async function initializeDatabase() {
     `);
     logger.info('Таблица Apps проверена/создана');
 
-    // Проверка и добавление столбца rejectionReason
+    // Проверка и добавление столбцов в таблицу Apps
     const [appColumns] = await connection.query(`SHOW COLUMNS FROM Apps`);
     const appColumnNames = appColumns.map(col => col.Field);
     if (!appColumnNames.includes('rejectionReason')) {
       await connection.query(`ALTER TABLE Apps ADD COLUMN rejectionReason TEXT`);
       logger.info('Добавлен столбец rejectionReason в таблицу Apps');
+    }
+    if (!appColumnNames.includes('isPublished')) {
+      await connection.query(`ALTER TABLE Apps ADD COLUMN isPublished BOOLEAN DEFAULT FALSE`);
+      logger.info('Добавлен столбец isPublished в таблицу Apps');
     }
 
     // Создание таблицы Advertisements
@@ -485,14 +490,14 @@ bot.onText(/\/status/, async (msg) => {
       return;
     }
 
-    const [apps] = await db.query('SELECT name, status FROM Apps WHERE userId = (SELECT id FROM Users WHERE telegramId = ?)', [chatId]);
+    const [apps] = await db.query('SELECT name, status, isPublished FROM Apps WHERE userId = (SELECT id FROM Users WHERE telegramId = ?)', [chatId]);
     let response = `Статус аккаунта (${user[0].email}): ${user[0].isVerified ? 'Верифицирован' : 'Ожидает верификации'}\n\n`;
     response += 'Ваши приложения:\n';
     if (apps.length === 0) {
       response += 'У вас нет приложений.';
     } else {
       apps.forEach(app => {
-        response += `- ${app.name}: ${app.status}\n`;
+        response += `- ${app.name}: ${app.status}, ${app.isPublished ? 'Опубликовано' : 'Не опубликовано'}\n`;
       });
     }
 
@@ -525,18 +530,52 @@ async function initializeServer() {
 }
 
 // Публичные маршруты
-// Получение одобренных приложений
+// Получение одобренных и опубликованных приложений
 app.get('/api/public/apps', async (req, res) => {
   try {
     const [apps] = await db.query(`
-      SELECT id, name, description, category, iconPath, status, createdAt
+      SELECT id, name, description, category, iconPath, status, createdAt, isPublished
       FROM Apps
-      WHERE status = 'approved'
+      WHERE status = 'approved' AND isPublished = TRUE
       ORDER BY createdAt DESC
     `);
     res.json(apps);
   } catch (err) {
     logger.error(`Ошибка получения приложений: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Получение публичной страницы приложения
+app.get('/api/public/apps/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [app] = await db.query(`
+      SELECT a.id, a.name, a.description, a.category, a.iconPath, a.apkPath, a.createdAt, a.isPublished, a.status,
+             u.name AS developerName
+      FROM Apps a
+      JOIN Users u ON a.userId = u.id
+      WHERE a.id = ? AND a.status = 'approved' AND a.isPublished = TRUE
+    `, [id]);
+
+    if (!app.length) {
+      logger.warn(`Публичное приложение не найдено для ID: ${id}`);
+      return res.status(404).json({ message: 'Приложение не найдено или не опубликовано' });
+    }
+
+    res.json({
+      id: app[0].id,
+      name: app[0].name,
+      description: app[0].description,
+      category: app[0].category,
+      iconUrl: app[0].iconPath,
+      apkUrl: app[0].apkPath,
+      createdAt: app[0].createdAt,
+      developerName: app[0].developerName,
+    });
+  } catch (err) {
+    logger.error(`Ошибка получения публичного приложения ID: ${id}: ${err.message}, стек: ${err.stack}`);
     res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
@@ -559,7 +598,7 @@ app.get('/api/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
     const [app] = await db.query(`
-      SELECT id, name, description, category, iconPath AS iconUrl, apkPath AS apkUrl, status, rejectionReason, createdAt
+      SELECT id, name, description, category, iconPath AS iconUrl, apkPath AS apkUrl, status, rejectionReason, createdAt, isPublished
       FROM Apps
       WHERE id = ? AND userId = ?
     `, [id, req.user.id]);
@@ -876,7 +915,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
 app.get('/api/apps', authenticateToken, async (req, res) => {
   try {
     const [apps] = await db.query(`
-      SELECT id, name, description, category, iconPath AS iconUrl, apkPath AS apkUrl, status, rejectionReason, createdAt
+      SELECT id, name, description, category, iconPath AS iconUrl, apkPath AS apkUrl, status, rejectionReason, createdAt, isPublished
       FROM Apps
       WHERE userId = ?
       ORDER BY createdAt DESC
@@ -1020,9 +1059,9 @@ app.post(
 
       const [result] = await db.query(
         `INSERT INTO Apps (
-          name, description, category, iconPath, apkPath, userId, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [name, description, category, iconUrl, apkUrl, user[0].id, 'pending']
+          name, description, category, iconPath, apkPath, userId, status, isPublished
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [name, description, category, iconUrl, apkUrl, user[0].id, 'pending', false]
       );
 
       logger.info(`Приложение создано пользователем ${user[0].email}: ${name}`);
@@ -1034,7 +1073,7 @@ app.post(
 
       res.status(201).json({
         message: 'Приложение успешно отправлено',
-        app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending' },
+        app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending', isPublished: false },
       });
     } catch (error) {
       logger.error(`Ошибка создания приложения: ${error.message}, стек: ${error.stack}`);
@@ -1134,7 +1173,7 @@ app.put(
       }
 
       await db.query(
-        `UPDATE Apps SET name = ?, description = ?, category = ?, iconPath = ?, apkPath = ?, status = 'pending' WHERE id = ?`,
+        `UPDATE Apps SET name = ?, description = ?, category = ?, iconPath = ?, apkPath = ?, status = 'pending', isPublished = FALSE WHERE id = ?`,
         [name, description, category, iconUrl, apkUrl, id]
       );
 
@@ -1148,13 +1187,13 @@ app.put(
       if (user[0].telegramId) {
         telegramQueue.add({
           chatId: user[0].telegramId,
-          text: `Ваше приложение "${name}" (ID: ${id}) обновлено и ожидает проверки.`,
+          text: `Ваше приложение "${name}" (ID: ${id}) обновлено и ожидает проверки. Статус публикации сброшен.`,
         }, { attempts: 3, backoff: 5000 });
       }
 
       res.status(200).json({
         message: 'Приложение успешно обновлено',
-        app: { id, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending' },
+        app: { id, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending', isPublished: false },
       });
     } catch (error) {
       logger.error(`Ошибка обновления приложения для ID: ${id}: ${error.message}, стек: ${error.stack}`);
@@ -1162,6 +1201,188 @@ app.put(
     }
   }
 );
+
+// Удаление приложения (для пользователя)
+app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [user] = await db.query('SELECT id, email, telegramId FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length) {
+      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+
+    const [app] = await db.query('SELECT iconPath, apkPath, name FROM Apps WHERE id = ? AND userId = ?', [id, user[0].id]);
+    if (!app.length) {
+      logger.warn(`Приложение не найдено для ID: ${id}, пользователь: ${user[0].email}`);
+      return res.status(404).json({ message: 'Приложение не найдено' });
+    }
+
+    // Удаление файлов из S3
+    if (app[0].iconPath) {
+      const iconKey = app[0].iconPath.split('/').pop();
+      if (iconKey) await deleteFromS3(`icons/${iconKey}`);
+    }
+    if (app[0].apkPath) {
+      const apkKey = app[0].apkPath.split('/').pop();
+      if (apkKey) await deleteFromS3(`apks/${apkKey}`);
+    }
+
+    await db.query('DELETE FROM Apps WHERE id = ?', [id]);
+    logger.info(`Приложение ${id} удалено пользователем ${user[0].email}`);
+
+    if (user[0].telegramId) {
+      telegramQueue.add({
+        chatId: user[0].telegramId,
+        text: `Приложение "${app[0].name}" (ID: ${id}) успешно удалено.`,
+      }, { attempts: 3, backoff: 5000 });
+    }
+
+    res.json({ message: 'Приложение успешно удалено' });
+  } catch (err) {
+    logger.error(`Ошибка удаления приложения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Дублирование приложения
+app.post('/api/apps/:id/duplicate', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [user] = await db.query('SELECT id, email, telegramId FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length) {
+      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+
+    const [app] = await db.query('SELECT * FROM Apps WHERE id = ? AND userId = ?', [id, user[0].id]);
+    if (!app.length) {
+      logger.warn(`Приложение не найдено для ID: ${id}, пользователь: ${user[0].email}`);
+      return res.status(404).json({ message: 'Приложение не найдено' });
+    }
+
+    const duplicatedApp = app[0];
+    const newName = `${duplicatedApp.name} (Copy)`;
+
+    // Копирование файлов в S3
+    const [newIconUrl, newApkUrl] = await Promise.all([
+      (async () => {
+        const iconKey = duplicatedApp.iconPath.split('/').pop();
+        const iconData = await getFromS3(`icons/${iconKey}`);
+        const newIconKey = `icons/${Date.now()}-${iconKey}`;
+        await s3Client.send(new PutObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: newIconKey,
+          Body: iconData.Body,
+          ContentType: iconData.ContentType,
+          ACL: 'public-read',
+        }));
+        return `https://s3.twcstorage.ru/${BUCKET_NAME}/${newIconKey}`;
+      })(),
+      (async () => {
+        const apkKey = duplicatedApp.apkPath.split('/').pop();
+        const apkData = await getFromS3(`apks/${apkKey}`);
+        const newApkKey = `apks/${Date.now()}-${apkKey}`;
+        await s3Client.send(new PutObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: newApkKey,
+          Body: apkData.Body,
+          ContentType: apkData.ContentType,
+          ACL: 'public-read',
+        }));
+        return `https://s3.twcstorage.ru/${BUCKET_NAME}/${newApkKey}`;
+      })(),
+    ]);
+
+    const [result] = await db.query(
+      `INSERT INTO Apps (
+        name, description, category, iconPath, apkPath, userId, status, isPublished
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newName,
+        duplicatedApp.description,
+        duplicatedApp.category,
+        newIconUrl,
+        newApkUrl,
+        user[0].id,
+        'pending',
+        false
+      ]
+    );
+
+    logger.info(`Приложение ${id} дублировано пользователем ${user[0].email}, новый ID: ${result.insertId}`);
+
+    if (user[0].telegramId) {
+      telegramQueue.add({
+        chatId: user[0].telegramId,
+        text: `Приложение "${duplicatedApp.name}" успешно дублировано как "${newName}" (ID: ${result.insertId}).`,
+      }, { attempts: 3, backoff: 5000 });
+    }
+
+    res.status(201).json({
+      message: 'Приложение успешно дублировано',
+      app: {
+        id: result.insertId,
+        name: newName,
+        description: duplicatedApp.description,
+        category: duplicatedApp.category,
+        iconUrl: newIconUrl,
+        apkUrl: newApkUrl,
+        status: 'pending',
+        isPublished: false,
+      },
+    });
+  } catch (err) {
+    logger.error(`Ошибка дублирования приложения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Публикация/снятие с публикации приложения
+app.put('/api/apps/:id/publish', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { isPublished } = req.body;
+
+  try {
+    if (typeof isPublished !== 'boolean') {
+      return res.status(400).json({ message: 'Недопустимый статус публикации' });
+    }
+
+    const [user] = await db.query('SELECT id, email, telegramId FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length) {
+      logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+
+    const [app] = await db.query('SELECT name, status FROM Apps WHERE id = ? AND userId = ?', [id, user[0].id]);
+    if (!app.length) {
+      logger.warn(`Приложение не найдено для ID: ${id}, пользователь: ${user[0].email}`);
+      return res.status(404).json({ message: 'Приложение не найдено' });
+    }
+
+    if (isPublished && app[0].status !== 'approved') {
+      logger.warn(`Попытка публикации неутверждённого приложения ID: ${id}, пользователь: ${user[0].email}`);
+      return res.status(400).json({ message: 'Приложение должно быть одобрено перед публикацией' });
+    }
+
+    await db.query('UPDATE Apps SET isPublished = ? WHERE id = ?', [isPublished, id]);
+    logger.info(`Статус публикации приложения ${id} обновлён на ${isPublished} пользователем ${user[0].email}`);
+
+    if (user[0].telegramId) {
+      telegramQueue.add({
+        chatId: user[0].telegramId,
+        text: `Приложение "${app[0].name}" (ID: ${id}) ${isPublished ? 'опубликовано' : 'снято с публикации'}.`,
+      }, { attempts: 3, backoff: 5000 });
+    }
+
+    res.json({ message: `Приложение ${isPublished ? 'опубликовано' : 'снято с публикации'}` });
+  } catch (err) {
+    logger.error(`Ошибка изменения статуса публикации приложения: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
 
 // Маршруты администратора
 // Получение всех приложений
@@ -1209,9 +1430,10 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Приложение не найдено' });
     }
 
-    await db.query('UPDATE Apps SET status = ?, rejectionReason = ? WHERE id = ?', [
+    await db.query('UPDATE Apps SET status = ?, rejectionReason = ?, isPublished = ? WHERE id = ?', [
       status,
       status === 'rejected' ? rejectionReason : null,
+      status === 'approved' ? app[0].isPublished : false,
       id
     ]);
     logger.info(`Статус приложения ${id} обновлён на ${status}`);
@@ -1221,7 +1443,7 @@ app.put('/api/admin/apps/:id', authenticateToken, async (req, res) => {
       if (appUser[0].telegramId) {
         let message;
         if (status === 'approved') {
-          message = `Поздравляем, ${appUser[0].name}! Ваше приложение "${app[0].name}" одобрено и теперь доступно.`;
+          message = `Поздравляем, ${appUser[0].name}! Ваше приложение "${app[0].name}" одобрено${app[0].isPublished ? ' и опубликовано' : ''}.`;
         } else {
           message = `Уважаемый ${appUser[0].name}, ваше приложение "${app[0].name}" было отклонено. Причина: ${rejectionReason}. Пожалуйста, исправьте и отправьте снова.`;
         }
@@ -1249,7 +1471,7 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
       return res.status(403).json({ message: 'Требуется доступ администратора' });
     }
 
-    const [app] = await db.query('SELECT iconPath, apkPath FROM Apps WHERE id = ?', [id]);
+    const [app] = await db.query('SELECT iconPath, apkPath, name, userId FROM Apps WHERE id = ?', [id]);
     if (!app.length) {
       return res.status(404).json({ message: 'Приложение не найдено' });
     }
@@ -1264,7 +1486,15 @@ app.delete('/api/admin/apps/:id', authenticateToken, async (req, res) => {
     }
 
     await db.query('DELETE FROM Apps WHERE id = ?', [id]);
-    logger.info(`Приложение ${id} удалено`);
+    logger.info(`Приложение ${id} удалено администратором`);
+
+    const [appUser] = await db.query('SELECT telegramId FROM Users WHERE id = ?', [app[0].userId]);
+    if (appUser[0].telegramId) {
+      telegramQueue.add({
+        chatId: appUser[0].telegramId,
+        text: `Ваше приложение "${app[0].name}" (ID: ${id}) было удалено администратором.`,
+      }, { attempts: 3, backoff: 5000 });
+    }
 
     res.json({ message: 'Приложение удалено' });
   } catch (err) {
