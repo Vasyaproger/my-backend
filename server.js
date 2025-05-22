@@ -347,6 +347,8 @@ async function initializeDatabase() {
       logger.info('Добавлен столбец isBlocked');
     }
 
+
+
     // Создание таблицы PreRegisters
     await connection.query(`
       CREATE TABLE IF NOT EXISTS PreRegisters (
@@ -389,6 +391,30 @@ async function initializeDatabase() {
       await connection.query(`ALTER TABLE Apps ADD COLUMN isPublished BOOLEAN DEFAULT FALSE`);
       logger.info('Добавлен столбец isPublished в таблицу Apps');
     }
+
+
+
+    // Создание таблицы Comments
+await connection.query(`
+  CREATE TABLE IF NOT EXISTS Comments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    appId INT NOT NULL,
+    userId INT NOT NULL,
+    userName VARCHAR(255) NOT NULL,
+    comment TEXT NOT NULL,
+    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (appId) REFERENCES Apps(id) ON DELETE CASCADE,
+    FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
+  )
+`);
+logger.info('Таблица Comments проверена/создана');
+
+// Проверка и добавление столбца downloadCount в таблицу Apps
+if (!appColumnNames.includes('downloadCount')) {
+  await connection.query(`ALTER TABLE Apps ADD COLUMN downloadCount INT DEFAULT 0`);
+  logger.info('Добавлен столбец downloadCount в таблицу Apps');
+}
 
     // Создание таблицы Advertisements
     await connection.query(`
@@ -552,7 +578,7 @@ app.get('/api/public/apps/:id', async (req, res) => {
 
   try {
     const [app] = await db.query(`
-      SELECT a.id, a.name, a.description, a.category, a.iconPath, a.apkPath, a.createdAt, a.isPublished, a.status,
+      SELECT a.id, a.name, a.description, a.category, a.iconPath, a.apkPath, a.createdAt, a.isPublished, a.status, a.downloadCount,
              u.name AS developerName
       FROM Apps a
       JOIN Users u ON a.userId = u.id
@@ -564,6 +590,13 @@ app.get('/api/public/apps/:id', async (req, res) => {
       return res.status(404).json({ message: 'Приложение не найдено или не опубликовано' });
     }
 
+    const [comments] = await db.query(`
+      SELECT userName, comment, createdAt
+      FROM Comments
+      WHERE appId = ?
+      ORDER BY createdAt DESC
+    `, [id]);
+
     res.json({
       id: app[0].id,
       name: app[0].name,
@@ -573,13 +606,18 @@ app.get('/api/public/apps/:id', async (req, res) => {
       apkUrl: app[0].apkPath,
       createdAt: app[0].createdAt,
       developerName: app[0].developerName,
+      downloadCount: app[0].downloadCount,
+      comments: comments.map(comment => ({
+        userName: comment.userName,
+        comment: comment.comment,
+        createdAt: comment.createdAt,
+      })),
     });
   } catch (err) {
     logger.error(`Ошибка получения публичного приложения ID: ${id}: ${err.message}, стек: ${err.stack}`);
     res.status(500).json({ message: 'Ошибка сервера', error: err.message });
   }
 });
-
 // Получение изображения приложения
 app.get('/api/public/app-image/:key', optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
@@ -650,6 +688,25 @@ app.post(
   }
 );
 
+
+app.post('/api/public/apps/:id/increment-download', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [app] = await db.query('SELECT id FROM Apps WHERE id = ? AND status = "approved" AND isPublished = TRUE', [id]);
+    if (!app.length) {
+      logger.warn(`Приложение не найдено для увеличения скачиваний, ID: ${id}`);
+      return res.status(404).json({ message: 'Приложение не найдено или не опубликовано' });
+    }
+
+    await db.query('UPDATE Apps SET downloadCount = downloadCount + 1 WHERE id = ?', [id]);
+    logger.info(`Счетчик скачиваний увеличен для приложения ID: ${id}`);
+    res.status(200).json({ message: 'Счетчик скачиваний увеличен' });
+  } catch (err) {
+    logger.error(`Ошибка увеличения счетчика скачиваний для ID: ${id}: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
 // Регистрация пользователя
 app.post(
   '/api/auth/register',
