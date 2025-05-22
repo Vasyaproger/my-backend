@@ -689,6 +689,83 @@ app.post(
 );
 
 
+
+// Проверка безопасности приложения
+app.get('/api/public/apps/:id/check-safety', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Получение информации о приложении
+    const [app] = await db.query(`
+      SELECT id, name, apkPath, status, isPublished
+      FROM Apps
+      WHERE id = ? AND status = 'approved' AND isPublished = TRUE
+    `, [id]);
+
+    if (!app.length) {
+      logger.warn(`Приложение не найдено для проверки безопасности, ID: ${id}`);
+      return res.status(404).json({ message: 'Приложение не найдено или не опубликовано' });
+    }
+
+    // Проверка APK-файла
+    const apkUrl = app[0].apkPath;
+    const apkKey = apkUrl.split('/').pop();
+
+    try {
+      // Получение файла из S3
+      const apkData = await getFromS3(`apks/${apkKey}`);
+      logger.info(`Файл APK получен для проверки безопасности: ${apkKey}`);
+
+      // Пример интеграции с VirusTotal (или другим сервисом проверки безопасности)
+      // Замените на реальный API-ключ и URL сервиса
+      const virusTotalApiKey = process.env.VIRUS_TOTAL_API_KEY || 'your_virus_total_api_key';
+      const virusTotalUrl = 'https://www.virustotal.com/api/v3/files';
+
+      // Загрузка файла в VirusTotal
+      const formData = new FormData();
+      formData.append('file', apkData.Body, { filename: apkKey });
+
+      const response = await axios.post(virusTotalUrl, formData, {
+        headers: {
+          'x-apikey': virusTotalApiKey,
+          ...formData.getHeaders(),
+        },
+        timeout: 30000,
+      });
+
+      const scanResult = response.data;
+      logger.info(`Результат проверки безопасности для приложения ID: ${id}, имя: ${app[0].name}`);
+
+      // Простая интерпретация результата (зависит от API)
+      const isSafe = !scanResult.data.attributes.last_analysis_stats.malicious;
+
+      res.status(200).json({
+        message: isSafe ? 'Приложение безопасно' : 'Обнаружены потенциальные угрозы',
+        appId: id,
+        appName: app[0].name,
+        isSafe: isSafe,
+        scanDetails: scanResult.data.attributes.last_analysis_stats,
+      });
+
+      // Отправка уведомления администратору в случае обнаружения угроз
+      if (!isSafe) {
+        telegramQueue.add({
+          chatId: '-1002311447135',
+          text: `Обнаружены угрозы в приложении "${app[0].name}" (ID: ${id}). Подробности: ${JSON.stringify(scanResult.data.attributes.last_analysis_stats)}`,
+        }, { attempts: 3, backoff: 5000 });
+      }
+
+    } catch (scanError) {
+      logger.error(`Ошибка сканирования APK для приложения ID: ${id}: ${scanError.message}, стек: ${scanError.stack}`);
+      return res.status(500).json({ message: 'Ошибка проверки безопасности', error: scanError.message });
+    }
+
+  } catch (err) {
+    logger.error(`Ошибка проверки безопасности приложения ID: ${id}: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
 app.post('/api/public/apps/:id/increment-download', async (req, res) => {
   const { id } = req.params;
 
