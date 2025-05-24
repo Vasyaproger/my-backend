@@ -347,7 +347,36 @@ async function initializeDatabase() {
       logger.info('Добавлен столбец isBlocked');
     }
 
+await connection.query(`
+    CREATE TABLE IF NOT EXISTS CommunityPosts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      userId INT NOT NULL,
+      userName VARCHAR(255) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      content TEXT NOT NULL,
+      status ENUM('active', 'moderated', 'deleted') DEFAULT 'active',
+      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
+    )
+  `);
+  logger.info('Таблица CommunityPosts проверена/создана');
 
+
+   await connection.query(`
+    CREATE TABLE IF NOT EXISTS CommunityComments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      postId INT NOT NULL,
+      userId INT NOT NULL,
+      userName VARCHAR(255) NOT NULL,
+      comment TEXT NOT NULL,
+      createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (postId) REFERENCES CommunityPosts(id) ON DELETE CASCADE,
+      FOREIGN KEY (userId) REFERENCES Users(id) ON DELETE CASCADE
+    )
+  `);
+  logger.info('Таблица CommunityComments проверена/создана');
 
     // Создание таблицы PreRegisters
     await connection.query(`
@@ -927,6 +956,309 @@ app.post(
     }
   }
 );
+
+
+app.get('/api/community/posts', async (req, res) => {
+  try {
+    const [posts] = await db.query(`
+      SELECT p.id, p.userId, p.userName, p.title, p.content, p.createdAt
+      FROM CommunityPosts p
+      WHERE p.status = 'active'
+      ORDER BY p.createdAt DESC
+    `);
+
+    const postsWithComments = await Promise.all(posts.map(async post => {
+      const [comments] = await db.query(`
+        SELECT c.id, c.userId, c.userName, c.comment, c.createdAt
+        FROM CommunityComments c
+        WHERE c.postId = ?
+        ORDER BY c.createdAt ASC
+      `, [post.id]);
+      return { ...post, comments };
+    }));
+
+    res.json(postsWithComments);
+  } catch (err) {
+    logger.error(`Ошибка получения постов сообщества: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+app.post(
+  '/api/community/posts',
+  authenticateToken,
+  [
+    body('title').notEmpty().trim().withMessage('Требуется заголовок поста'),
+    body('content').notEmpty().trim().withMessage('Требуется содержание поста'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+    }
+
+    try {
+      const { title, content } = req.body;
+      const [user] = await db.query('SELECT id, name, email, telegramId, isVerified, isBlocked FROM Users WHERE id = ?', [req.user.id]);
+      if (!user.length) {
+        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'Пользователь не найден' });
+      }
+
+      if (!user[0].isVerified) {
+        logger.warn(`Неверифицированный пользователь: ${user[0].email}`);
+        return res.status(403).json({ message: 'Аккаунт должен быть верифицирован для создания постов' });
+      }
+
+      if (user[0].isBlocked) {
+        logger.warn(`Заблокированный пользователь: ${user[0].email}`);
+        return res.status(403).json({ message: 'Ваш аккаунт заблокирован' });
+      }
+
+      if (containsDesignSuggestions(content) || containsDesignSuggestions(title)) {
+        logger.warn(`Обнаружены предложения по дизайну в посте от пользователя: ${user[0].email}`);
+        if (user[0].telegramId) {
+          telegramQueue.add({
+            chatId: user[0].telegramId,
+            text: `Ваш пост "${title}" отклонён, так как содержит предложения по дизайну (например, UI, UX, цвет). Пожалуйста, исправьте и отправьте снова.`,
+          }, { attempts: 3, backoff: 5000 });
+        }
+        return res.status(400).json({
+          message: 'Пост содержит предложения по дизайну. Пожалуйста, исправьте и отправьте снова.',
+        });
+      }
+
+      const [result] = await db.query(
+        `INSERT INTO CommunityPosts (userId, userName, title, content, status)
+         VALUES (?, ?, ?, ?, 'active')`,
+        [user[0].id, user[0].name, title, content]
+      );
+
+      const newPost = {
+        id: result.insertId,
+        userId: user[0].id,
+        userName: user[0].name,
+        title,
+        content,
+        createdAt: new Date().toISOString(),
+        comments: [],
+      };
+
+      logger.info(`Пост создан пользователем ${user[0].email}: ${title}`);
+      telegramQueue.add({
+        chatId: '-1002311447135',
+        text: `Новый пост в сообществе: "${title}" от ${user[0].email}`,
+      }, { attempts: 3, backoff: 5000 });
+
+      if (user[0].telegramId) {
+        telegramQueue.add({
+          chatId: user[0].telegramId,
+          text: `Ваш пост "${title}" успешно опубликован в сообществе.`,
+        }, { attempts: 3, backoff: 5000 });
+      }
+
+      res.status(201).json(newPost);
+    } catch (err) {
+      logger.error(`Ошибка создания поста: ${err.message}, стек: ${err.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    }
+});
+
+// Create a comment on a post
+app.post(
+  '/api/community/posts/:postId/comments',
+  authenticateToken,
+  [
+    body('comment').notEmpty().trim().withMessage('Требуется текст комментария'),
+  ],
+  async (req, res) => {
+    const { postId } = req.params;
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+    }
+
+    try {
+      const { comment } = req.body;
+      const [user] = await db.query('SELECT id, name, email, telegramId, isVerified, isBlocked FROM Users WHERE id = ?', [req.user.id]);
+      if (!user.length) {
+        logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
+        return res.status(404).json({ message: 'Пользователь не найден' });
+      }
+
+      if (!user[0].isVerified) {
+        logger.warn(`Неверифицированный пользователь: ${user[0].email}`);
+        return res.status(403).json({ message: 'Аккаунт должен быть верифицирован для комментирования' });
+      }
+
+      if (user[0].isBlocked) {
+        logger.warn(`Заблокированный пользователь: ${user[0].email}`);
+        return res.status(403).json({ message: 'Ваш аккаунт заблокирован' });
+      }
+
+      const [post] = await db.query('SELECT userId, title FROM CommunityPosts WHERE id = ? AND status = "active"', [postId]);
+      if (!post.length) {
+        logger.warn(`Пост не найден или не активен для ID: ${postId}`);
+        return res.status(404).json({ message: 'Пост не найден или не активен' });
+      }
+
+      if (containsDesignSuggestions(comment)) {
+        logger.warn(`Обнаружены предложения по дизайну в комментарии от пользователя: ${user[0].email}`);
+        if (user[0].telegramId) {
+          telegramQueue.add({
+            chatId: user[0].telegramId,
+            text: `Ваш комментарий к посту "${post[0].title}" отклонён, так как содержит предложения по дизайну (например, UI, UX, цвет). Пожалуйста, исправьте и отправьте снова.`,
+          }, { attempts: 3, backoff: 5000 });
+        }
+        return res.status(400).json({
+          message: 'Комментарий содержит предложения по дизайну. Пожалуйста, исправьте и отправьте снова.',
+        });
+      }
+
+      const [result] = await db.query(
+        `INSERT INTO CommunityComments (postId, userId, userName, comment)
+         VALUES (?, ?, ?, ?)`,
+        [postId, user[0].id, user[0].name, comment]
+      );
+
+      const newComment = {
+        id: result.insertId,
+        postId: parseInt(postId),
+        userId: user[0].id,
+        userName: user[0].name,
+        comment,
+        createdAt: new Date().toISOString(),
+      };
+
+      logger.info(`Комментарий добавлен пользователем ${user[0].email} к посту ID: ${postId}`);
+      telegramQueue.add({
+        chatId: '-1002311447135',
+        text: `Новый комментарий к посту "${post[0].title}" от ${user[0].email}: ${comment.substring(0, 50)}...`,
+      }, { attempts: 3, backoff: 5000 });
+
+      if (user[0].telegramId && user[0].id !== post[0].userId) {
+        const [postOwner] = await db.query('SELECT telegramId FROM Users WHERE id = ?', [post[0].userId]);
+        if (postOwner[0].telegramId) {
+          telegramQueue.add({
+            chatId: postOwner[0].telegramId,
+            text: `Новый комментарий к вашему посту "${post[0].title}" от ${user[0].name}: ${comment.substring(0, 50)}...`,
+          }, { attempts: 3, backoff: 5000 });
+        }
+      }
+
+      res.status(201).json(newComment);
+    } catch (err) {
+      logger.error(`Ошибка добавления комментария: ${err.message}, стек: ${err.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    }
+});
+
+// Admin Routes
+// Get all posts (including moderated/deleted) for admin
+app.get('/api/admin/community/posts', authenticateToken, async (req, res) => {
+  try {
+    const [user] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!user.length || user[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    const [posts] = await db.query(`
+      SELECT p.*, u.email as userEmail, u.name as userName
+      FROM CommunityPosts p
+      JOIN Users u ON p.userId = u.id
+      ORDER BY p.createdAt DESC
+    `);
+
+    const postsWithComments = await Promise.all(posts.map(async post => {
+      const [comments] = await db.query(`
+        SELECT c.id, c.userId, c.userName, c.comment, c.createdAt
+        FROM CommunityComments c
+        WHERE c.postId = ?
+        ORDER BY c.createdAt ASC
+      `, [post.id]);
+      return { ...post, comments };
+    }));
+
+    res.json(postsWithComments);
+  } catch (err) {
+    logger.error(`Ошибка получения постов для администратора: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Moderate a post (change status)
+app.put('/api/admin/community/posts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    if (!['active', 'moderated', 'deleted'].includes(status)) {
+      return res.status(400).json({ message: 'Недопустимый статус поста' });
+    }
+
+    const [post] = await db.query('SELECT userId, title FROM CommunityPosts WHERE id = ?', [id]);
+    if (!post.length) {
+      return res.status(404).json({ message: 'Пост не найден' });
+    }
+
+    await db.query('UPDATE CommunityPosts SET status = ? WHERE id = ?', [status, id]);
+    logger.info(`Статус поста ${id} обновлён на ${status}`);
+
+    const [postOwner] = await db.query('SELECT telegramId, name FROM Users WHERE id = ?', [post[0].userId]);
+    if (postOwner[0].telegramId) {
+      telegramQueue.add({
+        chatId: postOwner[0].telegramId,
+        text: `Ваш пост "${post[0].title}" был ${status === 'active' ? 'восстановлен' : status === 'moderated' ? 'отправлен на модерацию' : 'удалён'} администратором.`,
+      }, { attempts: 3, backoff: 5000 });
+    }
+
+    res.json({ message: `Статус поста обновлён на ${status}` });
+  } catch (err) {
+    logger.error(`Ошибка модерации поста: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
+
+// Delete a comment
+app.delete('/api/admin/community/comments/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
+      return res.status(403).json({ message: 'Требуется доступ администратора' });
+    }
+
+    const [comment] = await db.query('SELECT userId, postId, comment FROM CommunityComments WHERE id = ?', [id]);
+    if (!comment.length) {
+      return res.status(404).json({ message: 'Комментарий не найден' });
+    }
+
+    await db.query('DELETE FROM CommunityComments WHERE id = ?', [id]);
+    logger.info(`Комментарий ${id} удалён администратором`);
+
+    const [commentOwner] = await db.query('SELECT telegramId FROM Users WHERE id = ?', [comment[0].userId]);
+    if (commentOwner[0].telegramId) {
+      const [post] = await db.query('SELECT title FROM CommunityPosts WHERE id = ?', [comment[0].postId]);
+      telegramQueue.add({
+        chatId: commentOwner[0].telegramId,
+        text: `Ваш комментарий к посту "${post[0].title}" ("${comment[0].comment.substring(0, 50)}...") был удалён администратором.`,
+      }, { attempts: 3, backoff: 5000 });
+    }
+
+    res.json({ message: 'Комментарий удалён' });
+  } catch (err) {
+    logger.error(`Ошибка удаления комментария: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+  }
+});
 
 // Сброс пароля
 app.post(
