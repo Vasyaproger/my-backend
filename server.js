@@ -300,14 +300,15 @@ async function initializeDatabase() {
     logger.info('Подключение к MySQL установлено');
 
     // Создание таблицы Users
+   // Обновление таблицы Users с новым типом accountType
     await connection.query(`
       CREATE TABLE IF NOT EXISTS Users (
         id INT AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(255) NOT NULL UNIQUE,
         password VARCHAR(255) NOT NULL,
-        accountType ENUM('individual', 'commercial') NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        phone VARCHAR(20) NOT NULL,
+        accountType ENUM('individual', 'commercial', 'user') NOT NULL,
+        name VARCHAR(255),
+        phone VARCHAR(20),
         telegramId VARCHAR(255) UNIQUE,
         addressStreet VARCHAR(255),
         addressCity VARCHAR(255),
@@ -328,24 +329,55 @@ async function initializeDatabase() {
     logger.info('Таблица Users проверена/создана');
 
     // Проверка и добавление отсутствующих столбцов
+    async function updateUsersTableSchema(connection) {
+  try {
+    // Запрашиваем список столбцов таблицы Users один раз
     const [columns] = await connection.query(`SHOW COLUMNS FROM Users`);
     const columnNames = columns.map(col => col.Field);
+    logger.info('Получен список столбцов таблицы Users');
+
+    // Проверяем и обновляем столбец accountType
+    if (columnNames.includes('accountType')) {
+      const [accountTypeField] = await connection.query(`SHOW FIELDS FROM Users WHERE Field = 'accountType'`);
+      if (accountTypeField.length && !accountTypeField[0].Type.includes('user')) {
+        await connection.query(`
+          ALTER TABLE Users MODIFY COLUMN accountType ENUM('individual', 'commercial', 'user') NOT NULL
+        `);
+        logger.info('Обновлено перечисление accountType, добавлен тип "user"');
+      } else if (!accountTypeField.length) {
+        logger.warn('Столбец accountType найден, но не удалось получить его тип');
+      }
+    } else {
+      logger.warn('Столбец accountType отсутствует в таблице Users');
+    }
+
+    // Добавляем отсутствующие столбцы
     if (!columnNames.includes('telegramId')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN telegramId VARCHAR(255) UNIQUE`);
       logger.info('Добавлен столбец telegramId');
     }
+
     if (!columnNames.includes('verificationToken')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN verificationToken VARCHAR(500)`);
       logger.info('Добавлен столбец verificationToken');
     }
+
     if (!columnNames.includes('verificationExpires')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN verificationExpires DATETIME`);
       logger.info('Добавлен столбец verificationExpires');
     }
+
     if (!columnNames.includes('isBlocked')) {
       await connection.query(`ALTER TABLE Users ADD COLUMN isBlocked BOOLEAN DEFAULT FALSE`);
       logger.info('Добавлен столбец isBlocked');
     }
+
+    logger.info('Схема таблицы Users успешно проверена и обновлена');
+  } catch (error) {
+    logger.error(`Ошибка при обновлении схемы таблицы Users: ${error.message}, стек: ${error.stack}`);
+    throw error; // Перебрасываем ошибку для обработки на уровень выше
+  }
+}
 
 await connection.query(`
     CREATE TABLE IF NOT EXISTS CommunityPosts (
@@ -584,6 +616,54 @@ async function initializeServer() {
   }
 }
 
+
+app.post(
+  '/api/auth/register-user',
+  [
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('password').isLength({ min: 6 }).withMessage('Пароль должен содержать не менее 6 символов'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
+      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+    }
+
+    try {
+      const { email, password } = req.body;
+
+      const [existingUser] = await db.query('SELECT email FROM Users WHERE email = ?', [email]);
+      if (existingUser.length > 0) {
+        return res.status(400).json({ message: 'Email уже зарегистрирован' });
+      }
+
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+
+      const [result] = await db.query(
+        `INSERT INTO Users (
+          email, password, accountType, isVerified
+        ) VALUES (?, ?, ?, ?)`,
+        [email, hashedPassword, 'user', true]
+      );
+
+      const authToken = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: '7d' });
+      await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [authToken, result.insertId]);
+
+      logger.info(`Обычный пользователь зарегистрирован: ${email}`);
+      res.status(201).json({
+        message: 'Регистрация успешна. Вы можете войти в систему.',
+        token: authToken,
+        user: { id: result.insertId, email, accountType: 'user', isVerified: true },
+      });
+    } catch (error) {
+      logger.error(`Ошибка регистрации обычного пользователя: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+    }
+  }
+);
+
 // Публичные маршруты
 // Получение одобренных и опубликованных приложений
 app.get('/api/public/apps', async (req, res) => {
@@ -819,6 +899,7 @@ app.post('/api/public/apps/:id/increment-download', async (req, res) => {
   }
 });
 // Регистрация пользователя
+// Обновление маршрута регистрации разработчиков (для ясности)
 app.post(
   '/api/auth/register',
   upload,
@@ -883,7 +964,7 @@ app.post(
 
       telegramQueue.add({
         chatId: '-1002311447135',
-        text: `Новые документы на проверку от пользователя ${email} (регистрация). Количество: ${documentUrls.length}`,
+        text: `Новые документы на проверку от разработчика ${email}. Количество: ${documentUrls.length}`,
       }, { attempts: 3, backoff: 5000 });
 
       if (telegramId) {
@@ -893,7 +974,7 @@ app.post(
         }, { attempts: 3, backoff: 5000 });
       }
 
-      logger.info(`Пользователь зарегистрирован: ${email}, документы: ${JSON.stringify(documentUrls)}`);
+      logger.info(`Разработчик зарегистрирован: ${email}, документы: ${JSON.stringify(documentUrls)}`);
       res.status(201).json({
         message: telegramId
           ? 'Регистрация успешна. Ваши документы отправлены на проверку.'
@@ -902,12 +983,11 @@ app.post(
         user: { id: result.insertId, email, accountType, name, phone, telegramId, isVerified: false },
       });
     } catch (error) {
-      logger.error(`Ошибка регистрации: ${error.message}, стек: ${error.stack}`);
+      logger.error(`Ошибка регистрации разработчика: ${error.message}, стек: ${error.stack}`);
       res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
   }
 );
-
 // Вход пользователя
 app.post(
   '/api/auth/login',
@@ -941,14 +1021,22 @@ app.post(
         return res.status(400).json({ message: 'Недействительный email или пароль' });
       }
 
-      const token = jwt.sign({ id: user[0].id, email: user[0].email }, JWT_SECRET, { expiresIn: '7d' });
+      const token = jwt.sign({ id: user[0].id, email: user[0].email, accountType: user[0].accountType }, JWT_SECRET, { expiresIn: '7d' });
       await db.query('UPDATE Users SET jwtToken = ? WHERE id = ?', [token, user[0].id]);
 
-      logger.info(`Пользователь вошёл: ${user[0].email}`);
+      logger.info(`Пользователь вошёл: ${user[0].email}, тип: ${user[0].accountType}`);
       res.status(200).json({
         token,
-        user: { id: user[0].id, email: user[0].email, accountType: user[0].accountType, name: user[0].name, phone: user[0].phone, telegramId: user[0].telegramId, isVerified: user[0].isVerified },
-        message: user[0].isVerified ? 'Вход успешен' : 'Вход успешен, но аккаунт ожидает верификации документов',
+        user: {
+          id: user[0].id,
+          email: user[0].email,
+          accountType: user[0].accountType,
+          name: user[0].name,
+          phone: user[0].phone,
+          telegramId: user[0].telegramId,
+          isVerified: user[0].isVerified
+        },
+        message: user[0].isVerified || user[0].accountType === 'user' ? 'Вход успешен' : 'Вход успешен, но аккаунт ожидает верификации документов',
       });
     } catch (error) {
       logger.error(`Ошибка входа: ${error.message}, стек: ${error.stack}`);
@@ -956,7 +1044,6 @@ app.post(
     }
   }
 );
-
 
 app.get('/api/community/posts', async (req, res) => {
   try {
@@ -1481,10 +1568,15 @@ app.post(
     }
 
     try {
-      const [user] = await db.query('SELECT id, email, isVerified, telegramId FROM Users WHERE id = ?', [req.user.id]);
+      const [user] = await db.query('SELECT id, email, isVerified, telegramId, accountType FROM Users WHERE id = ?', [req.user.id]);
       if (!user.length) {
         logger.warn(`Пользователь не найден для ID: ${req.user.id}`);
         return res.status(404).json({ message: 'Пользователь не найден' });
+      }
+
+      if (user[0].accountType === 'user') {
+        logger.warn(`Обычный пользователь ${user[0].email} попытался создать приложение`);
+        return res.status(403).json({ message: 'Обычные пользователи не могут создавать приложения' });
       }
 
       if (!user[0].isVerified) {
@@ -1544,7 +1636,17 @@ app.post(
 
       res.status(201).json({
         message: 'Приложение успешно отправлено',
-        app: { id: result.insertId, name, description, category, iconPath: iconUrl, apkPath: apkUrl, userId: user[0].id, status: 'pending', isPublished: false },
+        app: {
+          id: result.insertId,
+          name,
+          description,
+          category,
+          iconPath: iconUrl,
+          apkPath: apkUrl,
+          userId: user[0].id,
+          status: 'pending',
+          isPublished: false
+        },
       });
     } catch (error) {
       logger.error(`Ошибка создания приложения: ${error.message}, стек: ${error.stack}`);
