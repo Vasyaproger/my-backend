@@ -1674,6 +1674,7 @@ app.put(
 );
 
 // Удаление приложения (для пользователя)
+// Удаление приложения (для пользователя)
 app.delete('/api/apps/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
