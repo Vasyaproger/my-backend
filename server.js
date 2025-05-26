@@ -706,13 +706,18 @@ app.get('/api/public/apps/:id', async (req, res) => {
       ORDER BY createdAt DESC
     `, [id]);
 
+    // Формируем полные URLs
+    const baseUrl = `https://s3.twcstorage.ru/${BUCKET_NAME}/`;
+    const iconUrl = app[0].iconPath ? `${baseUrl}${app[0].iconPath}` : '';
+    const apkUrl = app[0].apkPath ? `${baseUrl}${app[0].apkPath}` : '';
+
     res.json({
       id: app[0].id,
       name: app[0].name,
       description: app[0].description,
       category: app[0].category,
-      iconUrl: app[0].iconPath,
-      apkUrl: app[0].apkPath,
+      iconUrl: iconUrl,
+      apkUrl: apkUrl,
       createdAt: app[0].createdAt,
       developerName: app[0].developerName,
       downloadCount: app[0].downloadCount,
