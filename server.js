@@ -395,6 +395,25 @@ await connection.query(`
   logger.info('Таблица CommunityPosts проверена/создана');
 
 
+  await connection.query(`
+      CREATE TABLE IF NOT EXISTS PreRegisters (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        telegramId VARCHAR(255) UNIQUE,
+        createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    logger.info('Таблица PreRegisters проверена/создана');
+
+    // Check and add telegramId column if missing
+    const [preRegisterColumns] = await connection.query(`SHOW COLUMNS FROM PreRegisters`);
+    const preRegisterColumnNames = preRegisterColumns.map(col => col.Field);
+    if (!preRegisterColumnNames.includes('telegramId')) {
+      await connection.query(`ALTER TABLE PreRegisters ADD COLUMN telegramId VARCHAR(255) UNIQUE`);
+      logger.info('Добавлен столбец telegramId в таблицу PreRegisters');
+    }
+
    await connection.query(`
     CREATE TABLE IF NOT EXISTS CommunityComments (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -771,38 +790,108 @@ app.get('/api/apps/:id', authenticateToken, async (req, res) => {
 // Предрегистрация пользователя
 app.post(
   '/api/pre-register',
-  [body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email')],
+  [
+    body('email').isEmail().normalizeEmail().withMessage('Требуется действительный email'),
+    body('telegramId').notEmpty().matches(/^(@[A-Za-z0-9_]{5,}|\d+)$/).withMessage('Требуется действительный Telegram ID (например, @username или ID)'),
+  ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       logger.warn(`Ошибки валидации: ${JSON.stringify(errors.array())}`);
-      return res.status(400).json({ message: 'Ошибка валидации', errors: errors.array() });
+      return res.status(400).json({ error: 'Ошибка валидации', details: errors.array() });
     }
 
     try {
-      const { email } = req.body;
-      const [existing] = await db.query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
-      if (existing.length > 0) {
-        return res.status(400).json({ message: 'Email уже в списке ожидания' });
+      const { email, telegramId } = req.body;
+
+      const [existingUser] = await db.query('SELECT email FROM PreRegisters WHERE email = ?', [email]);
+      if (existingUser.length > 0) {
+        logger.warn(`Email ${email} уже зарегистрирован для предварительного доступа`);
+        return res.status(400).json({ error: 'Email already registered for early access.' });
       }
 
-      await db.query('INSERT INTO PreRegisters (email) VALUES (?)', [email]);
-      logger.info(`Предрегистрация: ${email}`);
+      const [existingTelegram] = await db.query('SELECT telegramId FROM PreRegisters WHERE telegramId = ?', [telegramId]);
+      if (existingTelegram.length > 0) {
+        logger.warn(`Telegram ID ${telegramId} уже используется`);
+        return res.status(400).json({ error: 'Telegram ID is already registered.' });
+      }
 
+      await db.query(
+        'INSERT INTO PreRegisters (email, telegramId) VALUES (?, ?)',
+        [email, telegramId]
+      );
+
+      logger.info(`Предварительная регистрация: ${email}, Telegram ID: ${telegramId}`);
+
+      // Send confirmation to user
+      await telegramQueue.add({
+        chatId: telegramId,
+        text: `Спасибо за регистрацию в раннем доступе CityV Launcher, ${email}! Мы уведомим вас через Telegram, когда beta станет доступен.`,
+      }, { attempts: 3, backoff: 5000 });
+
+      // Notify admins
       await telegramQueue.add({
         chatId: '-1002311447135',
-        text: `Новая предрегистрация: ${email}`,
-      });
+        text: `Новая предварительная регистрация: ${email}, Telegram: ${telegramId}`,
+      }, { attempts: 3, backoff: 5000 });
 
-      res.status(201).json({ message: `Спасибо! Ваш email (${email}) добавлен в список ожидания.` });
+      res.status(201).json({
+        message: `Спасибо! Ваш email (${email}) и Telegram ID (${telegramId}) добавлены в список ожидания. Ожидайте уведомления в Telegram.`,
+        success: true
+      });
     } catch (error) {
-      logger.error(`Ошибка предрегистрации: ${error.message}, стек: ${error.stack}`);
-      res.status(500).json({ message: 'Ошибка сервера', error: error.message });
+      logger.error(`Ошибка предварительной регистрации: ${error.message}, стек: ${error.stack}`);
+      res.status(500).json({ error: 'Server error', details: error.message });
     }
   }
 );
 
 
+
+app.post('/api/admin/send-early-access', authenticateToken, async (req, res) => {
+  try {
+    const [admin] = await db.query('SELECT email, accountType FROM Users WHERE id = ?', [req.user.id]);
+    if (!admin.length || admin[0].email !== 'admin@24webstudio.ru') {
+      logger.warn(`Несанкционированная попытка отправки приглашений от ${req.user.email}`);
+      return res.status(403).json({ error: 'Требуется доступ администратора' });
+    }
+
+    const { betaLink, message } = req.body;
+    if (!betaLink || !message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'Требуется ссылка на бета-версию и текст сообщения' });
+    }
+
+    const [preRegisteredUsers] = await db.query('SELECT email, telegramId FROM PreRegisters WHERE telegramId IS NOT NULL');
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const user of preRegisteredUsers) {
+      try {
+        const inviteMessage = `${message}\n\nВаш доступ к бета-версии CityV Launcher: ${betaLink}`;
+        await telegramQueue.add({
+          chatId: user.telegramId,
+          text: inviteMessage,
+        }, { attempts: 3, backoff: 5000 });
+        successCount++;
+        logger.info(`Приглашение отправлено пользователю ${user.email} на Telegram ${user.telegramId}`);
+      } catch (err) {
+        errorCount++;
+        logger.error(`Ошибка отправки приглашения пользователю ${user.email}: ${err.message}`);
+      }
+    }
+
+    logger.info(`Рассылка приглашений завершена: ${successCount} успешно, ${errorCount} ошибок`);
+    res.status(200).json({
+      message: `Приглашения запланированы для ${successCount} пользователей`,
+      successCount,
+      errorCount,
+      success: true
+    });
+  } catch (err) {
+    logger.error(`Ошибка рассылки приглашений: ${err.message}, стек: ${err.stack}`);
+    res.status(500).json({ error: 'Server error', details: err.message });
+  }
+});
 
 // Проверка безопасности приложения
 app.get('/api/public/apps/:id/check-safety', async (req, res) => {
